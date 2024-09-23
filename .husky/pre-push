@@ -1,0 +1,2 @@
+#!/bin/sh
+pnpm run prettier:check && pnpm run eslint:check
