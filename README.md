@@ -1,6 +1,7 @@
 # OEV v1 Compound Example Bot
 
-A searching bot for a fork of Compound protocol using OEV v1 proxies.
+A searching bot for a [fork of Compound protocol](https://github.com/api3dao/oev-v1-compound/blob/main/README.md) using
+OEV v1 proxies.
 
 This repository documents the necessary steps to update an MEV bot to an OEV bot. While the main branch is the final
 result of the OEV bot, there are branches for the previous steps, so one can easily compare the changes.
@@ -10,7 +11,7 @@ result of the OEV bot, there are branches for the previous steps, so one can eas
 On branch [mev](https://github.com/api3dao/oev-v1-compound-bot/tree/mev)
 
 First step is to have an MEV bot that can perform liquidations when the opportunity to do so arises. For more
-information, refer to [OEV Searching](https://docs.api3.org/oev/searchers/).
+information, refer to [From MEV Searching](https://docs.api3.org/oev-searchers/in-depth/#from-mev-searching).
 
 ## MEV with Signed APIs bot
 
@@ -18,14 +19,14 @@ Changes [mev -> mev-with-signed-apis](https://github.com/api3dao/oev-v1-compound
 
 Second step is to extend the MEV bot to utilize the public Base Feed Endpoints. The existing MEV bot can utilize this
 off-chain open source data and make a base feed update on-chain whenever there is OEV to be captured. For more
-information, refer to [MEV with Signed APIs](https://docs.api3.org/oev/searchers/mev-with-signed-apis.html).
+information, refer to [MEV with Signed APIs](https://docs.api3.org/oev-searchers/in-depth/mev-with-signed-apis.html).
 
 ## OEV bot
 
 Changes [mev-with-signed-apis -> oev](https://github.com/api3dao/oev-v1-compound-bot/compare/mev-with-signed-apis...oev)
 
 Final step is to transition to utilizing the OEV network to acquire the exclusive privilege to update the data feeds.
-For more information, refer to [OEV Searching](https://docs.api3.org/oev/searchers/oev-searching.html).
+For more information, refer to [OEV Searching](https://docs.api3.org/oev-searchers/in-depth/oev-searching.html).
 
 ## How to
 
@@ -87,22 +88,24 @@ contracts the bot will be interacting with.
 A position in the Compound protocol is simply an address of the borrower - this is the identifier when we want to do a
 liquidation call. The position tracking functions are located in `src/lib/positions.ts`.
 
-Pertaining to positions are the storage variables `allPositions`, `currentPositions` and `interestingPositions`.
-`allPositions`, as its name might suggest, tracks all of the positions in the Compound protocol that at some point had
-executed a `borrow` action at some point. `currentPositions` is a subset of `allPositions`, meaning positions that
-currently have an active borrowing position. `interestingPositions` is a subset of `currentPositions`, a position
-becomes interesting when it crosses a certain LTV (Loan to Value) threshold.
+The storage variables `allPositions`, `currentPositions`, and `interestingPositions` are used to track different states
+of borrowing positions in the Compound protocol. `allPositions` tracks all positions that have ever executed a borrow
+action. `currentPositions` is a subset of `allPositions` and includes only those positions with an active borrowing
+status. `interestingPositions` is a further subset of `currentPositions`, representing positions that have crossed a
+specific Loan to Value (LTV) threshold.
 
-Since fetching all positions from the beginning of the protocol might take considerable amount of time, there is a file
-`all-positions.json` which gets loaded in the bot initialization phase and serves as a checkpoint so that the bot does
-not have to fetch the whole history every time it is restarted. The file can be created and updated by running
-abovementioned CLI command `prepare-positions-to-watch`.
+Since fetching all positions from the beginning of the protocol might take a considerable amount of time, there is an
+`all-positions.json` file that is loaded during the bot’s initialization phase and serves as a checkpoint, so the bot
+does not need to fetch the entire history each time it restarts. This file can be created and updated by running the CLI
+command `prepare-positions-to-watch` mentioned above.
 
 ### Liquidation
 
-Liquidations are made by interacting with our Compound3Liquidator contract. The details depend on the stage of the bot.
-The liquidation logic is slightly different for the OEV bot because the searcher needs to pay for the awarded bid on the
-OEV Network. The liquidation functions are located in `src/lib/oev-liquidation.ts`.
+Liquidations are carried out by interacting with the Compound3Liquidator contract, with specific details depending on
+the bot’s current stage. The liquidation logic is slightly different for the OEV bot, as the searcher must first deposit
+collateral on the OevAuctionHouse contract before placing a bid to qualify for receiving update details and then must
+also pay for the awarded bid. Both actions are conducted on the OEV Network. The liquidation functions are located in
+`src/lib/oev-liquidation.ts`.
 
 The process in general is as follows:
 

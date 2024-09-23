@@ -24,7 +24,7 @@ export const env = cleanEnv(process.env, {
   MAX_BORROWER_DETAILS_MULTICALL: num(),
   MAX_LOG_RANGE_BLOCKS: num(),
   MAX_POSITIONS_TO_LIQUIDATE: num(),
-  MIN_POSITION_USD_E18: etherValidator(),
+  MIN_POSITION_USD: etherValidator(),
   MIN_RPC_DELAY_MS: num(),
   RESET_CURRENT_POSITIONS_FREQUENCY_MS: num(),
   RESET_INTERESTING_POSITIONS_FREQUENCY_MS: num(),

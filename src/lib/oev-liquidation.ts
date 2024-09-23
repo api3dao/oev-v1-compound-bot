@@ -85,8 +85,8 @@ export const liquidatePositions = async (liquidatablePositions: Compound3Positio
     liquidationThreshold: 0n,
   };
 
+  // Compute the gas limit for the transaction.
   const goSimulate = await go(async () => {
-    // Compute the gas limit for the transaction.
     const estimatedGasLimitPromise = compound3Connectors.compound3Liquidator
       .connect(baseConnectors.wallet)
       .liquidate.estimateGas(callArgs);

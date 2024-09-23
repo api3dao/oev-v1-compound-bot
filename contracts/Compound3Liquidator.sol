@@ -18,7 +18,7 @@ import { IV3SwapRouter } from './uniswap/swap-router-contracts/contracts/interfa
 event AbsorbFailed(address indexed borrower);
 
 contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
-  address public profitReceiver;
+  address public beneficiary;
   uint24 public constant DEFAULT_POOL_FEE = 500; // 0.05%
   uint256 public constant QUOTE_PRICE_SCALE = 1e18;
   address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -45,9 +45,12 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
     uint256[] assetBaseAmounts;
   }
 
-  constructor(address initialProfitReceiver, address _comet) Ownable(msg.sender) {
-    profitReceiver = initialProfitReceiver == address(0) ? msg.sender : initialProfitReceiver;
-    comet = IComet(_comet);
+  /// @notice Initializes the contract
+  /// @param beneficiary_ Address of the beneficiary wallet to receive the liquidation profits
+  /// @param comet_ Address of the Compound3 Comet contract (each Comet is expected to have a dedicated Liquidator contract)
+  constructor(address beneficiary_,address comet_) Ownable(msg.sender) {
+    beneficiary = beneficiary_ == address(0) ? msg.sender : beneficiary_;
+    comet = IComet(comet_);
     uniswapPoolFees[WETH][WSTETH] = 100;
     uniswapPoolFees[WSTETH][WETH] = 100;
   }
@@ -172,7 +175,7 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
 
     uint256 profit = address(this).balance;
     uint256 profitUsd = (profit * comet.getPrice(wethAsset.priceFeed)) / wethAsset.scale;
-    profitReceiver.call{ value: profit }('');
+    beneficiary.call{ value: profit }('');
 
     return (profit, profitUsd);
   }
@@ -189,7 +192,6 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
     address baseToken = comet.baseToken();
     TransferHelper.safeApprove(baseToken, address(comet), receivedAmount);
 
-    uint256 totalAmountOut;
     for (uint i; i < assets.length; ++i) {
       address asset = assets[i];
       uint256 assetBaseAmount = data.assetBaseAmounts[i];
@@ -264,11 +266,13 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
     require(sent, 'Failed to send Ether!');
   }
 
-  /// @notice Function to set address where bot profits should be forwarded.
-  /// @param newProfitReceiver The new address.
-  function setProfitReceiverAddress(address newProfitReceiver) external onlyOwner {
-    require(newProfitReceiver != address(0), "Address can't be set to 0");
-    profitReceiver = newProfitReceiver;
+  /// @notice Function to set the address where the bot profits should be forwarded.
+  /// @param beneficiary_ The new address.
+  function setBeneficiaryAddress(
+    address beneficiary_
+  ) external virtual onlyOwner {
+    require(beneficiary_ != address(0), "Address can't be set to 0");
+    beneficiary = beneficiary_;
   }
 
   /// @notice Function to set preferred Uniswap pool fee to swap a given token.
