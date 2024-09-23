@@ -7,6 +7,7 @@ import { format } from 'prettier';
 import { Compound3Liquidator__factory as Compound3LiquidatorFactory } from '../typechain-types';
 
 import { COMET_ADDRESS } from './constants';
+import { compound3Api3Feeds } from './lib/compound3';
 import {
   ALL_POSITIONS_FILE_PATH,
   POSITIONS_TO_WATCH_FILE_PATH,
@@ -39,7 +40,7 @@ const preparePositionsToWatch = async (resetAllPositions: boolean) => {
 };
 
 export const runCliUtils = async () => {
-  const { baseConnectors } = initializeStorage();
+  const { baseConnectors } = initializeStorage(compound3Api3Feeds);
 
   // Expected usage is to call this script with the type of command to perform.
   const command = process.argv[2];

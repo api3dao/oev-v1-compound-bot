@@ -10,6 +10,11 @@ import { ethers, type Wallet } from 'ethers';
 import { type Multicall3, Multicall3__factory as Multicall3Factory } from '../typechain-types';
 
 export const baseContractAddresses = {
+  api3OevCbethEthProxy: '0xe653cca9f7dF2E31ce00e2393916DC662885a289',
+  api3OevEthUsdProxy: '0x5b0cf2b36a65a6BB085D501B971e4c102B9Cd473',
+  api3OevWstethStethProxy: '0xa7C64E79eeee1A4c9B6Ea2976Fa37c276BB1A6cD',
+  api3OevStethUsdProxy: '0xAD806B3BD9cb89C5021CB4f2102258e3DfbB3BD4',
+  api3OevUsdcUsdProxy: '0xD3C586Eec1C6C3eC41D276a23944dea080eDCf7f',
   multicall3: '0xcA11bde05977b3631167028862bE2a173976CA11',
 } as const;
 
