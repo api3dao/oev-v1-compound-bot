@@ -1,0 +1,65 @@
+{
+  "name": "@api3/oev-v1-compound-bot",
+  "version": "1.0.0",
+  "keywords": [],
+  "license": "MIT",
+  "engines": {},
+  "files": [
+    "dist",
+    "src"
+  ],
+  "main": "./dist/src/npm-exports.js",
+  "packageManager": "pnpm@9.10.0",
+  "sideEffects": false,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/api3dao/oev-v1-compound-bot"
+  },
+  "scripts": {
+    "bot:cli-utils": "pnpm ts-node --transpileOnly src/entrypoints/cli-utils.ts",
+    "bot:run": "pnpm ts-node --transpileOnly src/entrypoints/bot.ts",
+    "build": "pnpm clean && pnpm contracts:compile:force && pnpm run tsc:build",
+    "clean": "rimraf ./artifacts/ ./build ./cache ./coverage/ ./dist",
+    "contracts:compile": "hardhat compile",
+    "contracts:compile:force": "hardhat compile --force",
+    "dev:eth-node": "hardhat node",
+    "eslint:check": "eslint --report-unused-disable-directives --cache --ext js,ts . --max-warnings 0",
+    "eslint:fix": "pnpm run eslint:check --fix",
+    "prepare": "husky",
+    "prettier:check": "prettier --check \"./**/*.{js,ts,md,json,html}\"",
+    "prettier:fix": "prettier --write \"./**/*.{js,ts,md,json,html}\"",
+    "tsc": "tsc -p tsconfig.json",
+    "tsc:build": "tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@api3/chains": "^10.2.1",
+    "@api3/commons": "^0.13.2",
+    "@api3/contracts": "9.0.0",
+    "@api3/promise-utils": "^0.4.0",
+    "@api3/signed-api": "^2.0.0",
+    "@openzeppelin/contracts": "^5.0.2",
+    "dotenv": "^16.4.5",
+    "envalid": "^8.0.0",
+    "ethers": "^6.13.2",
+    "immer": "^10.1.1",
+    "lodash": "^4.17.21"
+  },
+  "devDependencies": {
+    "@api3/eslint-plugin-commons": "^2.0.1",
+    "@nomicfoundation/hardhat-ethers": "^3.0.8",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@total-typescript/ts-reset": "^0.6.1",
+    "@typechain/ethers-v6": "^0.5.1",
+    "@typechain/hardhat": "^9.1.0",
+    "@types/lodash": "^4.17.7",
+    "@types/node": "^20.16.5",
+    "hardhat": "^2.22.10",
+    "husky": "^9.1.6",
+    "prettier": "^3.3.3",
+    "rimraf": "^6.0.1",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typechain": "^8.3.2",
+    "typescript": "^5.6.2"
+  }
+}
