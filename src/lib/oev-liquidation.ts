@@ -3,27 +3,39 @@ import { go } from '@api3/promise-utils';
 import { MaxUint256 } from 'ethers';
 import { chunk, orderBy } from 'lodash';
 
-import { type Compound3Liquidator, type IComet } from '../../typechain-types';
+import { type IComet, type Multicall3 } from '../../typechain-types';
 import { type TypedEventLog } from '../../typechain-types/common';
 import { POSITIONS_CLOSE_TO_LIQUIDATION_LOG_SIZE } from '../constants';
 import { env } from '../env';
 import { logger } from '../logger';
 import { getPercentageValue } from '../utils';
 
-import { type Compound3PositionDetails } from './compound3';
+import { type Compound3PositionDetails, type GetAccountsDetails } from './compound3';
 import { computeLoanToValueFactor } from './positions';
 import { getStorage } from './storage';
 
-export const findLiquidatablePositions = async () => {
+export const findLiquidatablePositions = async (dapiUpdateCalls: Multicall3.Call3Struct[]) => {
   const {
     interestingPositions,
+    baseConnectors: { multicall3 },
     compound3Connectors: { compound3Liquidator },
   } = getStorage();
 
+  const compound3Address = await compound3Liquidator.getAddress();
+
   const accountsWithLiquidationInfo = [];
   for (const batch of chunk(interestingPositions, env.MAX_BORROWER_DETAILS_MULTICALL)) {
+    const calls = [
+      ...dapiUpdateCalls,
+      {
+        target: compound3Address,
+        callData: compound3Liquidator.interface.encodeFunctionData('getAccountsDetails', [batch]),
+        allowFailure: false,
+      },
+    ];
+
     // Perform the staticcall. This updates all of the feeds and determines whether the account is liquidatable.
-    const goStaticCall = await go(async () => compound3Liquidator.getAccountsDetails.staticCall(batch));
+    const goStaticCall = await go(async () => multicall3.aggregate3.staticCall(calls));
 
     // Handle the RPC error.
     if (goStaticCall.error) {
@@ -31,8 +43,19 @@ export const findLiquidatablePositions = async () => {
       continue;
     }
 
+    const accountDetailsCallResult = goStaticCall.data.at(-1)!;
+    if (!accountDetailsCallResult.success) {
+      // This should never happen.
+      logger.error('Failed to get account details', { returnData: accountDetailsCallResult.returnData });
+      continue;
+    }
+
     // Parse the returndata from the staticcall (excluding the dAPI update calls).
-    const { borrowsUsd, maxBorrowsUsd, collateralsUsd, areLiquidatable } = goStaticCall.data;
+    const { borrowsUsd, maxBorrowsUsd, collateralsUsd, areLiquidatable } =
+      compound3Liquidator.interface.decodeFunctionResult(
+        'getAccountsDetails',
+        goStaticCall.data.at(-1)![1]
+      ) as unknown as GetAccountsDetails;
 
     const borrowersWithDetailsBatch = batch.map(
       (_, index): Compound3PositionDetails => ({
@@ -75,21 +98,32 @@ export const findLiquidatablePositions = async () => {
   return orderedLiquidations;
 };
 
-export const liquidatePositions = async (liquidatablePositions: Compound3PositionDetails[]) => {
+export const liquidatePositions = async (
+  liquidatablePositions: Compound3PositionDetails[],
+  dapiUpdateCalls: Multicall3.Call3Struct[]
+) => {
   const { compound3Connectors, baseConnectors } = getStorage();
+  const liquidatorAddress = await compound3Connectors.compound3Liquidator.getAddress();
 
-  // Prepare liquidation call arguments.
-  const callArgs: Compound3Liquidator.LiquidateParamsStruct = {
-    liquidatableAccounts: liquidatablePositions.map(({ position }) => position),
-    maxAmountsToPurchase: [MaxUint256, MaxUint256, MaxUint256],
-    liquidationThreshold: 0n,
+  // Prepare liquidation calls.
+  const liquidationCall: Multicall3.Call3Struct = {
+    target: liquidatorAddress,
+    allowFailure: false,
+    callData: compound3Connectors.compound3Liquidator.interface.encodeFunctionData('liquidate', [
+      {
+        liquidatableAccounts: liquidatablePositions.map(({ position }) => position),
+        maxAmountsToPurchase: [MaxUint256, MaxUint256, MaxUint256],
+        liquidationThreshold: 0n,
+      },
+    ]),
   };
+  const calls = [...dapiUpdateCalls, liquidationCall];
 
   const goSimulate = await go(async () => {
     // Compute the gas limit for the transaction.
-    const estimatedGasLimitPromise = compound3Connectors.compound3Liquidator
+    const estimatedGasLimitPromise = baseConnectors.multicall3
       .connect(baseConnectors.wallet)
-      .liquidate.estimateGas(callArgs);
+      .aggregate3.estimateGas(calls);
 
     return Promise.all([estimatedGasLimitPromise, baseConnectors.wallet.getNonce()]);
   });
@@ -110,9 +144,9 @@ export const liquidatePositions = async (liquidatablePositions: Compound3Positio
   });
 
   const { gasPrice } = await baseConnectors.provider.getFeeData();
-  const txResponse = await compound3Connectors.compound3Liquidator
+  const txResponse = await baseConnectors.multicall3
     .connect(baseConnectors.wallet)
-    .liquidate(callArgs, { gasPrice, nonce, gasLimit });
+    .aggregate3(calls, { gasPrice, nonce, gasLimit });
   const txReceipt = await txResponse.wait(1, env.LIQUIDATION_TRANSACTION_TIMEOUT_MS);
 
   if (txReceipt === null) {
