@@ -1,0 +1,23 @@
+.DS_Store
+.build
+.env
+.eslintcache
+.idea
+.log
+.tsbuildinfo
+.vscode
+build
+coverage
+dist
+node_modules
+secrets.env
+
+# Hardhat files
+artifacts
+cache
+coverage.json
+ignition/deployments/chain-31337
+typechain-types
+
+# Custom ignore files
+*.ignore
