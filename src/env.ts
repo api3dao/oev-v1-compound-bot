@@ -30,4 +30,5 @@ export const env = cleanEnv(process.env, {
   RESET_INTERESTING_POSITIONS_FREQUENCY_MS: num(),
   RPC_URL: str(),
   RUN_IN_LOOP_MAX_WAIT_TIME_PERCENTAGE: num(),
+  SIGNED_API_FETCH_DELAY_MS: num(),
 });
