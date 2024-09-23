@@ -4,8 +4,16 @@ import { runInLoop } from '@api3/commons';
 import { go, goSync } from '@api3/promise-utils';
 import { difference, noop } from 'lodash';
 
+import {
+  fetchDataFeedIds,
+  fetchDataFeedsDetails,
+  getBeaconsUpdateCalls,
+  getRealTimeFeedValues,
+  type SignedData,
+} from './beacons';
 import { LIQUIDATION_HARD_TIMEOUT_MS } from './constants';
 import { env } from './env';
+import { compound3Api3Feeds } from './lib/compound3';
 import { findLiquidatablePositions, liquidatePositions } from './lib/oev-liquidation';
 import { fetchPositionsChunk, filterPositions, POSITIONS_TO_WATCH_FILE_PATH } from './lib/positions';
 import { type Compound3Position, getStorage, initializeStorage, updateStorage } from './lib/storage';
@@ -56,8 +64,7 @@ export class Compound3Bot {
   }
 
   async initialize() {
-    initializeStorage();
-
+    initializeStorage(compound3Api3Feeds);
     // Initialize the target chain (in case of failure retry indefinitely).
     await runInLoop(
       this.initializePositions.bind(this),
@@ -95,6 +102,84 @@ export class Compound3Bot {
   async fetchTargetChainCurrentBlockNumber() {
     const { provider } = getStorage().baseConnectors;
     return provider.getBlockNumber();
+  }
+
+  getCurrentBeaconSets() {
+    const { api3FeedsToWatch, dataFeedIdToBeacons, dapiNameHashToDataFeedId } = getStorage();
+    const beaconSets = api3FeedsToWatch.map((feed) => {
+      const dataFeedId = dapiNameHashToDataFeedId[feed.dapiNameHash];
+      if (!dataFeedId) {
+        logger.warn('Data feed ID not found for dAPI', { dapiName: feed.dapiName });
+        return [];
+      }
+      const beacons = dataFeedIdToBeacons[dataFeedId];
+      if (!beacons) {
+        logger.warn('Beacons not found for data feed ID', { dataFeedId });
+        return [];
+      }
+
+      return beacons;
+    });
+
+    logger.info('Current beacon sets', { count: beaconSets.length });
+    return beaconSets;
+  }
+
+  async getDataFeedsBeacons() {
+    const { dataFeedIdToBeacons, api3FeedsToWatch } = getStorage();
+    const targetChainConnectors = getStorage().baseConnectors;
+
+    // Fetch the data feed ID for all given API3 feeds (dAPIs) in a single RPC call.
+    const dataFeedIds = await fetchDataFeedIds(
+      targetChainConnectors.api3ServerV1,
+      api3FeedsToWatch.map((feed) => feed.dapiNameHash)
+    );
+
+    // If the RPC call failed, return the last known beacons for the dAPIs.
+    if (!dataFeedIds) return this.getCurrentBeaconSets().flat();
+
+    // Persist the current data feed IDs for the dAPIs in storage.
+    updateStorage((draft) => {
+      for (const [i, { dapiNameHash }] of api3FeedsToWatch.entries()) {
+        draft.dapiNameHashToDataFeedId[dapiNameHash] = dataFeedIds[i]!;
+      }
+    });
+
+    // Fetch and persist data feed details for all data feeds that we're missing in storage.
+    const missingDataFeedIds = dataFeedIds.filter((feedId) => !(feedId in dataFeedIdToBeacons));
+    if (missingDataFeedIds.length > 0) {
+      const dataFeedDetails = await fetchDataFeedsDetails(targetChainConnectors.airseekerRegistry, missingDataFeedIds);
+      if (dataFeedDetails) {
+        updateStorage((draft) => {
+          for (const [i, dataFeedDetail] of dataFeedDetails.entries()) {
+            if (dataFeedDetail) draft.dataFeedIdToBeacons[missingDataFeedIds[i]!] = dataFeedDetail;
+          }
+        });
+      }
+    }
+
+    // Get the beacons for all the data feeds. Note, that the call needs to get the fresh state, because the steps above
+    // may update the dAPI details.
+    return this.getCurrentBeaconSets().flat();
+  }
+
+  async getRealTimeFeedUpdateCalls(realTimeFeedValues: SignedData[]) {
+    const { api3ServerV1 } = getStorage().baseConnectors;
+    const api3ServerAddress = await api3ServerV1.getAddress();
+    const beaconsUpdateCalls = getBeaconsUpdateCalls(api3ServerV1, api3ServerAddress, realTimeFeedValues);
+    const beaconSets = this.getCurrentBeaconSets();
+
+    const beaconSetsUpdateCalls = beaconSets
+      .filter((beaconSet) => beaconSet.length > 1)
+      .map((beaconSet) => ({
+        target: api3ServerAddress,
+        allowFailure: true, // We're allowing failure in case a liquidation can still be made.
+        callData: api3ServerV1.interface.encodeFunctionData('updateBeaconSetWithBeacons', [
+          beaconSet.map(({ beaconId }) => beaconId),
+        ]),
+      }));
+
+    return [...beaconsUpdateCalls, ...beaconSetsUpdateCalls];
   }
 
   async onFetchAndFilterNewPositions() {
@@ -194,7 +279,12 @@ export class Compound3Bot {
       return;
     }
 
-    const liquidatablePositions = await findLiquidatablePositions();
+    const dataFeedBeacons = await this.getDataFeedsBeacons();
+    if (!dataFeedBeacons) return;
+
+    const realTimeFeedValues = await getRealTimeFeedValues(dataFeedBeacons, env.SIGNED_API_FETCH_DELAY_MS);
+    const dapiUpdateCalls = await this.getRealTimeFeedUpdateCalls(realTimeFeedValues);
+    const liquidatablePositions = await findLiquidatablePositions(dapiUpdateCalls);
 
     setTimeout(async () => {
       const positionsToLiquidate = liquidatablePositions.slice(0, env.MAX_POSITIONS_TO_LIQUIDATE);
@@ -214,7 +304,7 @@ export class Compound3Bot {
         draft.currentlyLiquidatedPositions = liquidatedPositions;
       });
 
-      const goLiquidate = await go(() => liquidatePositions(positionsToLiquidate), {
+      const goLiquidate = await go(() => liquidatePositions(positionsToLiquidate, dapiUpdateCalls), {
         totalTimeoutMs: LIQUIDATION_HARD_TIMEOUT_MS,
       });
 
