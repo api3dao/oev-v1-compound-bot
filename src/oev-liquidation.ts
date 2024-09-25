@@ -233,7 +233,7 @@ export class Compound3Bot {
     await this.initialize();
 
     void runInLoop(
-      this.onFetchAndFilterNewPositions,
+      async () => this.onFetchAndFilterNewPositions(),
       createRunInLoopOptions(
         'fetch-and-filter-new-positions',
         env.FETCH_AND_FILTER_NEW_POSITIONS_FREQUENCY_MS,
@@ -242,7 +242,7 @@ export class Compound3Bot {
       )
     );
     void runInLoop(
-      this.onResetInterestingPositions,
+      async () => this.onResetInterestingPositions(),
       createRunInLoopOptions(
         'reset-interesting-positions',
         env.RESET_INTERESTING_POSITIONS_FREQUENCY_MS,
@@ -251,7 +251,7 @@ export class Compound3Bot {
       )
     );
     void runInLoop(
-      this.onResetCurrentPositions,
+      async () => this.onResetCurrentPositions(),
       createRunInLoopOptions(
         'reset-current-positions',
         env.RESET_CURRENT_POSITIONS_FREQUENCY_MS,
@@ -260,7 +260,7 @@ export class Compound3Bot {
       )
     );
     void runInLoop(
-      this.onInitiateOevLiquidations,
+      async () => this.onInitiateOevLiquidations(),
       createRunInLoopOptions(
         'initiate-oev-liquidations',
         env.INITIATE_OEV_LIQUIDATIONS_FREQUENCY_MS,
