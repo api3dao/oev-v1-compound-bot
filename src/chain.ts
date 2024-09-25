@@ -5,8 +5,6 @@ import {
   type Api3ServerV1,
   Api3ServerV1__factory as Api3ServerV1Factory,
   computeApi3MarketAirseekerRegistryAddress,
-  type ExternalMulticallSimulator,
-  ExternalMulticallSimulator__factory as ExternalMulticallSimulatorFactory,
 } from '@api3/contracts';
 import { ethers, type Wallet } from 'ethers';
 
@@ -19,7 +17,6 @@ export const baseContractAddresses = {
   api3OevStethUsdProxy: '0x93d2D4Aae8143E2a067a54C8138Dc8054Ad79910',
   api3OevUsdcUsdProxy: '0x773f1a8E77Bd9e91a84bD80Bf35e67e4989D5C4C',
   api3ServerV1: '0x709944a48cAf83535e43471680fDA4905FB3920a',
-  externalMulticallSimulator: '0xb45fe2838F47DCCEe00F635785EAF0c723F742E5',
   multicall3: '0xcA11bde05977b3631167028862bE2a173976CA11',
 } as const;
 
@@ -27,7 +24,6 @@ const network = new ethers.Network('base', hardhatConfig.networks().base!.chainI
 
 export interface BaseConnectors {
   provider: ethers.JsonRpcProvider;
-  externalMulticallSimulator: ExternalMulticallSimulator;
   api3ServerV1: Api3ServerV1;
   airseekerRegistry: AirseekerRegistry;
   wallet: Wallet;
@@ -44,10 +40,6 @@ export const createBaseConnectors = (wallet: ethers.Wallet, rpcUrl: string): Bas
     wallet: wallet.connect(provider),
     provider,
     multicall3: Multicall3Factory.connect(baseContractAddresses.multicall3, provider),
-    externalMulticallSimulator: ExternalMulticallSimulatorFactory.connect(
-      baseContractAddresses.externalMulticallSimulator,
-      provider
-    ),
     api3ServerV1: Api3ServerV1Factory.connect(baseContractAddresses.api3ServerV1, provider),
     airseekerRegistry: AirseekerRegistryFactory.connect(
       computeApi3MarketAirseekerRegistryAddress(hardhatConfig.networks().base!.chainId),

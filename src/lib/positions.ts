@@ -28,7 +28,7 @@ export const computeLoanToValueFactor = (borrowUsd: bigint, maxBorrowUsd: bigint
 const isPositionCurrentlySignificant = (position: Compound3PositionDetails) => {
   // The minimum position treshold uses 10^18 as precision. We check that the position needs to have sufficient
   // amount as collateral, because the liquidation profit is based on the percentage of the collateral.
-  const minCollateral = (env.MIN_POSITION_USD * PRICE_FACTOR_SCALE) / 10n ** 18n;
+  const minCollateral = (env.MIN_POSITION_USD_E18 * PRICE_FACTOR_SCALE) / 10n ** 18n;
   return position.collateralUsd >= minCollateral && position.borrowUsd > 0n;
 };
 

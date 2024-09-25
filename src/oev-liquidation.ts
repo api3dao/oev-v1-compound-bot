@@ -6,8 +6,8 @@ import { difference, noop } from 'lodash';
 
 import { LIQUIDATION_HARD_TIMEOUT_MS } from './constants';
 import { env } from './env';
+import { findLiquidatablePositions, liquidatePositions } from './lib/oev-liquidation';
 import { fetchPositionsChunk, filterPositions, POSITIONS_TO_WATCH_FILE_PATH } from './lib/positions';
-import { findLiquidatablePositions, liquidatePositions } from './lib/real-time-liquidation';
 import { type Compound3Position, getStorage, initializeStorage, updateStorage } from './lib/storage';
 import { logger } from './logger';
 import { createRunInLoopOptions, fetchPositions, mergePositions } from './utils';
@@ -57,11 +57,10 @@ export class Compound3Bot {
 
   async initialize() {
     initializeStorage();
+
     // Initialize the target chain (in case of failure retry indefinitely).
     await runInLoop(
-      async () => {
-        return this.initializePositions();
-      },
+      async () => this.initializePositions(),
       createRunInLoopOptions(
         'initialize-target-chain',
         env.INITIALIZE_TARGET_CHAIN_TIMEOUT_MS,
@@ -188,7 +187,7 @@ export class Compound3Bot {
     });
   }
 
-  async onInitiateRealTimeLiquidations() {
+  async onInitiateOevLiquidations() {
     const { currentlyLiquidatedPositions } = getStorage();
 
     if (currentlyLiquidatedPositions.length > 0) {
@@ -261,10 +260,10 @@ export class Compound3Bot {
       )
     );
     void runInLoop(
-      this.onInitiateRealTimeLiquidations,
+      this.onInitiateOevLiquidations,
       createRunInLoopOptions(
-        'initiate-real-time-liquidations',
-        env.INITIATE_REAL_TIME_LIQUIDATIONS_FREQUENCY_MS,
+        'initiate-oev-liquidations',
+        env.INITIATE_OEV_LIQUIDATIONS_FREQUENCY_MS,
         env.BOT_ENABLED,
         env.RUN_IN_LOOP_MAX_WAIT_TIME_PERCENTAGE
       )

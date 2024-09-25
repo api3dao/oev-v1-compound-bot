@@ -32,6 +32,9 @@ importers:
       envalid:
         specifier: ^8.0.0
         version: 8.0.0
+      ethers:
+        specifier: ^6.13.2
+        version: 6.13.2
       immer:
         specifier: ^10.1.1
         version: 10.1.1
@@ -63,9 +66,6 @@ importers:
       '@types/node':
         specifier: ^20.16.5
         version: 20.16.5
-      ethers:
-        specifier: ^6.13.2
-        version: 6.13.2
       hardhat:
         specifier: ^2.22.10
         version: 2.22.11(ts-node@10.9.2(@types/node@20.16.5)(typescript@5.6.2))(typescript@5.6.2)
