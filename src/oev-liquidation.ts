@@ -60,7 +60,7 @@ export class Compound3Bot {
 
     // Initialize the target chain (in case of failure retry indefinitely).
     await runInLoop(
-      async () => this.initializePositions(),
+      this.initializePositions.bind(this),
       createRunInLoopOptions(
         'initialize-target-chain',
         env.INITIALIZE_TARGET_CHAIN_TIMEOUT_MS,
@@ -233,7 +233,7 @@ export class Compound3Bot {
     await this.initialize();
 
     void runInLoop(
-      async () => this.onFetchAndFilterNewPositions(),
+      this.onFetchAndFilterNewPositions.bind(this),
       createRunInLoopOptions(
         'fetch-and-filter-new-positions',
         env.FETCH_AND_FILTER_NEW_POSITIONS_FREQUENCY_MS,
@@ -242,7 +242,7 @@ export class Compound3Bot {
       )
     );
     void runInLoop(
-      async () => this.onResetInterestingPositions(),
+      this.onResetInterestingPositions.bind(this),
       createRunInLoopOptions(
         'reset-interesting-positions',
         env.RESET_INTERESTING_POSITIONS_FREQUENCY_MS,
@@ -251,7 +251,7 @@ export class Compound3Bot {
       )
     );
     void runInLoop(
-      async () => this.onResetCurrentPositions(),
+      this.onResetCurrentPositions.bind(this),
       createRunInLoopOptions(
         'reset-current-positions',
         env.RESET_CURRENT_POSITIONS_FREQUENCY_MS,
@@ -260,7 +260,7 @@ export class Compound3Bot {
       )
     );
     void runInLoop(
-      async () => this.onInitiateOevLiquidations(),
+      this.onInitiateOevLiquidations.bind(this),
       createRunInLoopOptions(
         'initiate-oev-liquidations',
         env.INITIATE_OEV_LIQUIDATIONS_FREQUENCY_MS,
