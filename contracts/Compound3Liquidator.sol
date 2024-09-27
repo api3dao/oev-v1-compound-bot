@@ -5,6 +5,7 @@ import { Ownable } from '@openzeppelin/contracts/access/Ownable.sol';
 import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import { IERC20 } from '@openzeppelin/contracts/token/ERC20/IERC20.sol';
 import { IComet } from './compound3/interfaces/IComet.sol';
+import { IUniswapV3FlashCallback } from './uniswap/v3-core/contracts/interfaces/callback/IUniswapV3FlashCallback.sol';
 import { IUniswapV3SwapCallback } from './uniswap/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol';
 import { IUniswapV3Pool } from './uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol';
 import { TickMath } from './uniswap/v3-core/contracts/libraries/TickMath.sol';
@@ -14,29 +15,42 @@ import { TransferHelper } from './uniswap/v3-periphery/contracts/libraries/Trans
 import { IWETH9 } from './uniswap/v3-periphery/contracts/interfaces/external/IWETH9.sol';
 import { ISwapRouter02 } from './uniswap/swap-router-contracts/contracts/interfaces/ISwapRouter02.sol';
 import { IV3SwapRouter } from './uniswap/swap-router-contracts/contracts/interfaces/IV3SwapRouter.sol';
+import { IApi3ServerV1OevExtension } from './api3-contracts/api3-server-v1/interfaces/IApi3ServerV1OevExtension.sol';
 
 event AbsorbFailed(address indexed borrower);
 
-contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
+contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3FlashCallback {
   address public profitReceiver;
   uint24 public constant DEFAULT_POOL_FEE = 500; // 0.05%
+  uint256 public constant DAPP_ID = 1;
   uint256 public constant QUOTE_PRICE_SCALE = 1e18;
   address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
   address public constant WETH = 0x4200000000000000000000000000000000000006;
   address public constant WSTETH = 0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452;
   address public constant SWAP_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
   address public constant UNISWAP_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
+  address public constant API3_SERVER_V1_OEV_EXTENSION = 0xF930D1E37098128326F8731a476347f0840337cA;
 
   mapping(address => mapping(address => uint24)) public uniswapPoolFees;
 
   IComet public comet;
   IWETH9 weth = IWETH9(WETH);
   ISwapRouter02 swapRouter = ISwapRouter02(SWAP_ROUTER);
+  IApi3ServerV1OevExtension oevExtension = IApi3ServerV1OevExtension(API3_SERVER_V1_OEV_EXTENSION);
 
   struct LiquidateParams {
     address[] liquidatableAccounts;
     uint256[] maxAmountsToPurchase;
     uint256 liquidationThreshold;
+    uint32 signedDataTimestampCutoff;
+    bytes signature;
+    uint256 bidValue;
+    bytes[][] signedDataArray;
+  }
+
+  struct FlashCallbackData {
+    PoolAddress.PoolKey poolKey;
+    LiquidateParams params;
   }
 
   struct SwapCallbackData {
@@ -121,9 +135,55 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
   }
 
   function liquidate(LiquidateParams calldata params) external returns (uint256, uint256) {
+    PoolAddress.PoolKey memory poolKey = _getFlashSwapPoolKey(USDC, WETH);
+    IUniswapV3Pool pool = _getFlashSwapPool(poolKey);
+
+    pool.flash(
+      address(this),
+      params.bidValue, // token0 = WETH
+      0, // token1 = USDC
+      abi.encode(FlashCallbackData({ poolKey: poolKey, params: params }))
+    );
+
+    uint256 wethBalance = weth.balanceOf(address(this));
+    if (wethBalance > 0) {
+      weth.withdraw(wethBalance);
+    }
+
+    uint8 numberOfAssets = comet.numAssets();
+    IComet.AssetInfo memory wethAsset;
+    for (uint8 i; i < numberOfAssets; ++i) {
+      IComet.AssetInfo memory assetInfo = comet.getAssetInfo(i);
+      if (assetInfo.asset == WETH) {
+        wethAsset = assetInfo;
+      }
+    }
+
+    uint256 profit = address(this).balance;
+    uint256 profitUsd = (profit * comet.getPrice(wethAsset.priceFeed)) / wethAsset.scale;
+    profitReceiver.call{ value: profit }('');
+
+    return (profit, profitUsd);
+  }
+
+  /// @notice Callback for flash loans through Uniswap V3
+  function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata _data) external override {
+    FlashCallbackData memory data = abi.decode(_data, (FlashCallbackData));
+    CallbackValidation.verifyCallback(UNISWAP_FACTORY, data.poolKey);
+
+    weth.withdraw(data.params.bidValue);
+
+    oevExtension.payOevBid{ value: data.params.bidValue }(
+      DAPP_ID,
+      data.params.signedDataTimestampCutoff,
+      data.params.signature
+    );
+
+    _updateDataFeeds(data.params.signedDataArray);
+
     address[] memory accountToAbsorb = new address[](1);
-    for (uint8 i; i < params.liquidatableAccounts.length; ++i) {
-      accountToAbsorb[0] = params.liquidatableAccounts[i];
+    for (uint8 i; i < data.params.liquidatableAccounts.length; ++i) {
+      accountToAbsorb[0] = data.params.liquidatableAccounts[i];
 
       try comet.absorb(msg.sender, accountToAbsorb) {} catch {
         emit AbsorbFailed(accountToAbsorb[0]);
@@ -131,21 +191,17 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
     }
 
     uint8 numberOfAssets = comet.numAssets();
-    IComet.AssetInfo memory wethAsset;
     address[] memory assets = new address[](numberOfAssets);
     for (uint8 i; i < numberOfAssets; ++i) {
       IComet.AssetInfo memory assetInfo = comet.getAssetInfo(i);
       assets[i] = assetInfo.asset;
-      if (assetInfo.asset == WETH) {
-        wethAsset = assetInfo;
-      }
     }
 
     uint256 flashSwapAmount;
     uint256[] memory assetBaseAmounts = new uint256[](assets.length);
     for (uint8 i; i < assets.length; ++i) {
-      (, uint256 collateralBalanceInBase) = _purchasableBalanceOfAsset(assets[i], params.maxAmountsToPurchase[i]);
-      if (collateralBalanceInBase > params.liquidationThreshold) {
+      (, uint256 collateralBalanceInBase) = _purchasableBalanceOfAsset(assets[i], data.params.maxAmountsToPurchase[i]);
+      if (collateralBalanceInBase > data.params.liquidationThreshold) {
         flashSwapAmount += collateralBalanceInBase;
         assetBaseAmounts[i] = collateralBalanceInBase;
       }
@@ -165,16 +221,7 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
       abi.encode(SwapCallbackData({ poolKey: poolKey, assets: assets, assetBaseAmounts: assetBaseAmounts }))
     );
 
-    uint256 wethBalance = weth.balanceOf(address(this));
-    if (wethBalance > 0) {
-      weth.withdraw(wethBalance);
-    }
-
-    uint256 profit = address(this).balance;
-    uint256 profitUsd = (profit * comet.getPrice(wethAsset.priceFeed)) / wethAsset.scale;
-    profitReceiver.call{ value: profit }('');
-
-    return (profit, profitUsd);
+    weth.transfer(msg.sender, data.params.bidValue + fee0);
   }
 
   /// @notice Callback for flash swaps through Uniswap V3
@@ -217,6 +264,13 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
     }
 
     weth.transfer(msg.sender, requiredReturnAmount);
+  }
+
+  function _updateDataFeeds(bytes[][] memory signedDataArray) internal {
+    uint256 len = signedDataArray.length;
+    for (uint256 i; i < len; ++i) {
+      oevExtension.updateDappOevDataFeed(DAPP_ID, signedDataArray[i]);
+    }
   }
 
   function _purchasableBalanceOfAsset(
