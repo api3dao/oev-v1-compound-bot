@@ -1,11 +1,18 @@
 import { sleep } from '@api3/commons';
 import { go } from '@api3/promise-utils';
-import { MaxUint256 } from 'ethers';
+import { ethers, formatEther, formatUnits, MaxUint256, VoidSigner } from 'ethers';
 import { chunk, orderBy } from 'lodash';
 
-import { type IComet, type Multicall3 } from '../../typechain-types';
+import { type Compound3Liquidator, type IComet } from '../../typechain-types';
 import { type TypedEventLog } from '../../typechain-types/common';
-import { POSITIONS_CLOSE_TO_LIQUIDATION_LOG_SIZE } from '../constants';
+import {
+  DAPP_ID,
+  OEV_AUCTION_LENGTH_SECONDS,
+  OEV_AUCTIONEER_MAJOR_VERSION,
+  OEV_BIDDING_PHASE_BUFFER_SECONDS,
+  OEV_BIDDING_PHASE_LENGTH_SECONDS,
+  POSITIONS_CLOSE_TO_LIQUIDATION_LOG_SIZE,
+} from '../constants';
 import { env } from '../env';
 import { logger } from '../logger';
 import { getPercentageValue } from '../utils';
@@ -14,28 +21,37 @@ import { type Compound3PositionDetails, type GetAccountsDetails } from './compou
 import { computeLoanToValueFactor } from './positions';
 import { getStorage } from './storage';
 
-export const findLiquidatablePositions = async (dapiUpdateCalls: Multicall3.Call3Struct[]) => {
+export interface ReportFulfillmentParams {
+  bidTopic: string;
+  bidDetailsHash: string;
+  fulfillmentDetails: string;
+}
+
+export const findLiquidatablePositions = async (dapiUpdateCalls: string[]) => {
   const {
     interestingPositions,
-    baseConnectors: { multicall3 },
+    baseConnectors: { api3ServerV1OevExtension, provider },
     compound3Connectors: { compound3Liquidator },
   } = getStorage();
 
-  const compound3Address = await compound3Liquidator.getAddress();
+  const liquidatorAddress = await compound3Liquidator.getAddress();
 
   const accountsWithLiquidationInfo = [];
   for (const batch of chunk(interestingPositions, env.MAX_BORROWER_DETAILS_MULTICALL)) {
     const calls = [
       ...dapiUpdateCalls,
-      {
-        target: compound3Address,
-        callData: compound3Liquidator.interface.encodeFunctionData('getAccountsDetails', [batch]),
-        allowFailure: false,
-      },
+      api3ServerV1OevExtension.interface.encodeFunctionData('simulateExternalCall', [
+        liquidatorAddress,
+        compound3Liquidator.interface.encodeFunctionData('getAccountsDetails', [batch]),
+      ]),
     ];
 
     // Perform the staticcall. This updates all of the feeds and determines whether the account is liquidatable.
-    const goStaticCall = await go(async () => multicall3.aggregate3.staticCall(calls));
+    const goStaticCall = await go(async () =>
+      api3ServerV1OevExtension
+        .connect(new VoidSigner(ethers.ZeroAddress).connect(provider))
+        .tryMulticall.staticCall(calls)
+    );
 
     // Handle the RPC error.
     if (goStaticCall.error) {
@@ -43,10 +59,11 @@ export const findLiquidatablePositions = async (dapiUpdateCalls: Multicall3.Call
       continue;
     }
 
-    const accountDetailsCallResult = goStaticCall.data.at(-1)!;
-    if (!accountDetailsCallResult.success) {
+    const accountDetailsCallResultSuccess = goStaticCall.data.successes.at(-1)!;
+    const accountDetailsCallResultReturnData = goStaticCall.data.returndata.at(-1)!;
+    if (!accountDetailsCallResultSuccess) {
       // This should never happen.
-      logger.error('Failed to get account details', { returnData: accountDetailsCallResult.returnData });
+      logger.error('Failed to get account details', { returnData: accountDetailsCallResultReturnData });
       continue;
     }
 
@@ -54,7 +71,10 @@ export const findLiquidatablePositions = async (dapiUpdateCalls: Multicall3.Call
     const { borrowsUsd, maxBorrowsUsd, collateralsUsd, areLiquidatable } =
       compound3Liquidator.interface.decodeFunctionResult(
         'getAccountsDetails',
-        goStaticCall.data.at(-1)![1]
+        api3ServerV1OevExtension.interface.decodeFunctionResult(
+          'simulateExternalCall',
+          accountDetailsCallResultReturnData
+        )[0]
       ) as unknown as GetAccountsDetails;
 
     const borrowersWithDetailsBatch = batch.map(
@@ -98,32 +118,174 @@ export const findLiquidatablePositions = async (dapiUpdateCalls: Multicall3.Call
   return orderedLiquidations;
 };
 
+export const calculateExpectedProfit = async (
+  dapiUpdateCalls: string[],
+  liquidatablePositions: Compound3PositionDetails[]
+) => {
+  const {
+    baseConnectors: { api3ServerV1OevExtension, provider },
+    compound3Connectors: { compound3Liquidator },
+  } = getStorage();
+
+  const liquidatorAddress = await compound3Liquidator.getAddress();
+
+  let totalProfit = 0n;
+  let totalProfitUsd = 0n;
+  for (const batch of chunk(liquidatablePositions, env.MAX_SIMULATE_LIQUIDATIONS_MULTICALL)) {
+    const calls = [
+      ...dapiUpdateCalls,
+      api3ServerV1OevExtension.interface.encodeFunctionData('simulateExternalCall', [
+        liquidatorAddress,
+        compound3Liquidator.interface.encodeFunctionData('liquidate', [
+          {
+            liquidatableAccounts: batch.map(({ position }) => position),
+            maxAmountsToPurchase: [MaxUint256, MaxUint256, MaxUint256],
+            liquidationThreshold: 0n,
+          },
+        ]),
+      ]),
+    ];
+
+    // Perform the staticcall. This updates all of the feeds and gets liquidation profit.
+    const goStaticCall = await go(async () =>
+      api3ServerV1OevExtension
+        .connect(new VoidSigner(ethers.ZeroAddress).connect(provider))
+        .tryMulticall.staticCall(calls)
+    );
+
+    // Handle the RPC error.
+    if (goStaticCall.error) {
+      logger.error(`Error getting liquidation info: ${goStaticCall.error.message}`);
+      continue;
+    }
+
+    const liquidateCallResultSuccess = goStaticCall.data.successes.at(-1)!;
+    const liquidateCallResultReturnData = goStaticCall.data.returndata.at(-1)!;
+    if (!liquidateCallResultSuccess) {
+      logger.error('Failed to get liquidation profits', { returnData: liquidateCallResultReturnData });
+      continue;
+    }
+
+    // Parse the returndata from the staticcall (excluding the dAPI update calls).
+    const [profit, profitUsd] = compound3Liquidator.interface.decodeFunctionResult(
+      'liquidate',
+      api3ServerV1OevExtension.interface.decodeFunctionResult('simulateExternalCall', liquidateCallResultReturnData)[0]
+    ) as unknown as [bigint, bigint];
+
+    totalProfit += profit;
+    totalProfitUsd += profitUsd;
+
+    await sleep(env.MIN_RPC_DELAY_MS);
+  }
+
+  logger.info('Total expected profit', {
+    totalProfit: formatEther(totalProfit),
+    totalProfitUsd: formatUnits(totalProfitUsd, 8),
+  });
+  return totalProfit;
+};
+
+const determineSignedDataTimestampCutoff = () => {
+  const auctionOffset = Number(
+    BigInt(ethers.solidityPackedKeccak256(['uint256'], [DAPP_ID])) % BigInt(OEV_AUCTION_LENGTH_SECONDS)
+  );
+  const currentTimestamp = Math.floor(Date.now() / 1000);
+  const timeInCurrentAuction = (currentTimestamp - auctionOffset) % OEV_AUCTION_LENGTH_SECONDS;
+  const auctionStartTimestamp = currentTimestamp - timeInCurrentAuction;
+  const biddingPhaseEndTimestamp = auctionStartTimestamp + OEV_BIDDING_PHASE_LENGTH_SECONDS;
+  let signedDataTimestampCutoff = auctionStartTimestamp + OEV_BIDDING_PHASE_LENGTH_SECONDS;
+
+  if (biddingPhaseEndTimestamp - currentTimestamp < OEV_BIDDING_PHASE_BUFFER_SECONDS) {
+    logger.info('Not enough time to place bid in current auction, bidding for the next one', {
+      currentTimestamp,
+      biddingPhaseEndTimestamp,
+      auctionOffset,
+    });
+    signedDataTimestampCutoff += OEV_AUCTION_LENGTH_SECONDS;
+  }
+
+  return signedDataTimestampCutoff;
+};
+
+export const placeBid = async (bidAmount: bigint) => {
+  const { oevNetworkConnectors, compound3Connectors, baseConnectors } = getStorage();
+  const { chainId } = await baseConnectors.provider.getNetwork();
+
+  const liquidatorAddress = await compound3Connectors.compound3Liquidator.getAddress();
+  const nonce = ethers.hexlify(ethers.randomBytes(32));
+  const bidDetails = ethers.AbiCoder.defaultAbiCoder().encode(['address', 'bytes32'], [liquidatorAddress, nonce]);
+
+  const signedDataTimestampCutoff = determineSignedDataTimestampCutoff();
+  const nextBiddingPhaseEndTimestamp = signedDataTimestampCutoff + OEV_AUCTION_LENGTH_SECONDS;
+
+  const sender = oevNetworkConnectors.wallet.address;
+  const bidDetailsHash = ethers.keccak256(bidDetails);
+  const bidTopic = ethers.solidityPackedKeccak256(
+    ['uint256', 'uint256', 'uint32', 'uint32'],
+    [OEV_AUCTIONEER_MAJOR_VERSION, DAPP_ID, OEV_AUCTION_LENGTH_SECONDS, signedDataTimestampCutoff]
+  );
+  const bidId = ethers.solidityPackedKeccak256(['address', 'bytes32', 'bytes32'], [sender, bidTopic, bidDetailsHash]);
+
+  logger.info('Placing bid', { bidId, bidTopic, bidAmount, bidDetails, nextBiddingPhaseEndTimestamp });
+  const txResponse = await oevNetworkConnectors.oevAuctionHouse
+    .connect(oevNetworkConnectors.wallet)
+    .placeBidWithExpiration(
+      bidTopic,
+      chainId,
+      bidAmount,
+      bidDetails,
+      bidAmount,
+      bidAmount,
+      nextBiddingPhaseEndTimestamp
+    );
+
+  const txReceipt = await txResponse.wait(1, env.OEV_PLACE_BID_TRANSACTION_TIMEOUT_MS);
+
+  if (txReceipt === null) {
+    logger.error('Waiting for transaction receipt timed out');
+    return { bidId, bidTopic, bidDetailsHash, signedDataTimestampCutoff };
+  }
+  const { hash: txHash } = txReceipt;
+
+  if (txReceipt.status === 0) {
+    logger.error('Placing bid reverted', { txHash });
+    return null;
+  }
+  logger.info('Bid placed successfully', { txHash });
+
+  return { bidId, bidTopic, bidDetailsHash, signedDataTimestampCutoff };
+};
+
 export const liquidatePositions = async (
   liquidatablePositions: Compound3PositionDetails[],
-  dapiUpdateCalls: Multicall3.Call3Struct[]
+  bidAmount: bigint,
+  signature: string,
+  signedDataArray: string[][],
+  signedDataTimestampCutoff: number
 ) => {
   const { compound3Connectors, baseConnectors } = getStorage();
-  const liquidatorAddress = await compound3Connectors.compound3Liquidator.getAddress();
 
-  // Prepare liquidation calls.
-  const liquidationCall: Multicall3.Call3Struct = {
-    target: liquidatorAddress,
-    allowFailure: false,
-    callData: compound3Connectors.compound3Liquidator.interface.encodeFunctionData('liquidate', [
-      {
+  // Prepare liquidation calldata.
+  const liquidationParams: Compound3Liquidator.PayBidAndUpdateFeedsAndLiquidateParamsStruct = {
+    payOevBidCallbackData: {
+      signedDataArray,
+      liquidateParams: {
         liquidatableAccounts: liquidatablePositions.map(({ position }) => position),
         maxAmountsToPurchase: [MaxUint256, MaxUint256, MaxUint256],
         liquidationThreshold: 0n,
       },
-    ]),
+    },
+    bidAmount,
+    signature,
+
+    signedDataTimestampCutoff,
   };
-  const calls = [...dapiUpdateCalls, liquidationCall];
 
   const goSimulate = await go(async () => {
     // Compute the gas limit for the transaction.
-    const estimatedGasLimitPromise = baseConnectors.multicall3
+    const estimatedGasLimitPromise = compound3Connectors.compound3Liquidator
       .connect(baseConnectors.wallet)
-      .aggregate3.estimateGas(calls);
+      .payBidAndUpdateFeedsAndLiquidate.estimateGas(liquidationParams);
 
     return Promise.all([estimatedGasLimitPromise, baseConnectors.wallet.getNonce()]);
   });
@@ -144,9 +306,9 @@ export const liquidatePositions = async (
   });
 
   const { gasPrice } = await baseConnectors.provider.getFeeData();
-  const txResponse = await baseConnectors.multicall3
+  const txResponse = await compound3Connectors.compound3Liquidator
     .connect(baseConnectors.wallet)
-    .aggregate3(calls, { gasPrice, nonce, gasLimit });
+    .payBidAndUpdateFeedsAndLiquidate(liquidationParams, { gasPrice, nonce, gasLimit });
   const txReceipt = await txResponse.wait(1, env.LIQUIDATION_TRANSACTION_TIMEOUT_MS);
 
   if (txReceipt === null) {
@@ -193,4 +355,14 @@ export const liquidatePositions = async (
 
     logger.info('Liquidation successful');
   });
+
+  return txReceipt;
+};
+
+export const reportFulfillment = async (params: ReportFulfillmentParams) => {
+  logger.info('Reporting fulfillment', params);
+  const { oevAuctionHouse, wallet } = getStorage().oevNetworkConnectors;
+  const { bidTopic, bidDetailsHash, fulfillmentDetails } = params;
+
+  return oevAuctionHouse.connect(wallet).reportFulfillment(bidTopic, bidDetailsHash, fulfillmentDetails);
 };
