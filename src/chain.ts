@@ -3,6 +3,8 @@ import {
   AirseekerRegistry__factory as AirseekerRegistryFactory,
   type Api3ServerV1,
   Api3ServerV1__factory as Api3ServerV1Factory,
+  type Api3ServerV1OevExtension,
+  Api3ServerV1OevExtension__factory as Api3ServerV1OevExtensionFactory,
   deploymentAddresses,
 } from '@api3/contracts';
 import { ethers, type Wallet } from 'ethers';
@@ -24,6 +26,7 @@ const network = new ethers.Network('base', chainId);
 export interface BaseConnectors {
   provider: ethers.JsonRpcProvider;
   api3ServerV1: Api3ServerV1;
+  api3ServerV1OevExtension: Api3ServerV1OevExtension;
   airseekerRegistry: AirseekerRegistry;
   wallet: Wallet;
   multicall3: Multicall3;
@@ -40,6 +43,10 @@ export const createBaseConnectors = (wallet: ethers.Wallet, rpcUrl: string): Bas
     provider,
     multicall3: Multicall3Factory.connect(baseContractAddresses.multicall3, provider),
     api3ServerV1: Api3ServerV1Factory.connect(deploymentAddresses.Api3ServerV1[chainId], provider),
+    api3ServerV1OevExtension: Api3ServerV1OevExtensionFactory.connect(
+      deploymentAddresses.Api3ServerV1OevExtension[chainId],
+      provider
+    ),
     airseekerRegistry: AirseekerRegistryFactory.connect(deploymentAddresses.AirseekerRegistry[chainId], provider),
   };
 };

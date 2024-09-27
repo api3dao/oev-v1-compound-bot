@@ -3,9 +3,10 @@ import { ethers } from 'ethers';
 import { produce } from 'immer';
 
 import { allPositions, lastBlock } from '../all-positions.json';
-import { type Beacon, type Api3Feed } from '../beacons';
+import { type Beacon, type Api3Feed, type DataFeed } from '../beacons';
 import { createBaseConnectors, type BaseConnectors } from '../chain';
 import { env } from '../env';
+import { createOevNetworkConnectors, type OevNetworkConnectors } from '../oev-network';
 
 import { createCompound3Connectors, type Compound3Connectors } from './compound3';
 
@@ -19,8 +20,10 @@ export interface Compound3BotStorage {
   targetChainLastBlock: number;
   currentlyLiquidatedPositions: Compound3Position[];
   dataFeedIdToBeacons: Record<Hex, Beacon[]>;
+  dataFeedIdToOevDataFeed: Record<Hex, DataFeed>;
   dapiNameHashToDataFeedId: Record<Hex, Hex>;
   baseConnectors: BaseConnectors;
+  oevNetworkConnectors: OevNetworkConnectors;
   compound3Connectors: Compound3Connectors;
 }
 
@@ -29,6 +32,7 @@ let storage: Compound3BotStorage | null = null;
 export const initializeStorage = (api3FeedsToWatch: Api3Feed[]) => {
   const wallet = new ethers.Wallet(env.HOT_WALLET_PRIVATE_KEY);
   const baseConnectors = createBaseConnectors(wallet, env.RPC_URL);
+  const oevNetworkConnectors = createOevNetworkConnectors(wallet, env.OEV_NETWORK_RPC_URL);
 
   storage = {
     allPositions,
@@ -39,7 +43,9 @@ export const initializeStorage = (api3FeedsToWatch: Api3Feed[]) => {
     currentlyLiquidatedPositions: [],
     dapiNameHashToDataFeedId: {},
     dataFeedIdToBeacons: {},
+    dataFeedIdToOevDataFeed: {},
     interestingPositions: [],
+    oevNetworkConnectors,
     targetChainLastBlock: lastBlock,
   };
 
