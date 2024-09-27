@@ -14,29 +14,46 @@ import { TransferHelper } from './uniswap/v3-periphery/contracts/libraries/Trans
 import { IWETH9 } from './uniswap/v3-periphery/contracts/interfaces/external/IWETH9.sol';
 import { ISwapRouter02 } from './uniswap/swap-router-contracts/contracts/interfaces/ISwapRouter02.sol';
 import { IV3SwapRouter } from './uniswap/swap-router-contracts/contracts/interfaces/IV3SwapRouter.sol';
+import { IApi3ServerV1OevExtension } from './api3-contracts/api3-server-v1/interfaces/IApi3ServerV1OevExtension.sol';
+import { IApi3ServerV1OevExtensionPayOevBidCallback } from './api3-contracts/api3-server-v1/interfaces/IApi3ServerV1OevExtensionPayOevBidCallback.sol';
 
 event AbsorbFailed(address indexed borrower);
 
-contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
+contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IApi3ServerV1OevExtensionPayOevBidCallback {
   address public profitReceiver;
   uint24 public constant DEFAULT_POOL_FEE = 500; // 0.05%
+  uint256 public constant DAPP_ID = 1;
   uint256 public constant QUOTE_PRICE_SCALE = 1e18;
   address public constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
   address public constant WETH = 0x4200000000000000000000000000000000000006;
   address public constant WSTETH = 0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452;
   address public constant SWAP_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
   address public constant UNISWAP_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
+  address public constant API3_SERVER_V1_OEV_EXTENSION = 0x6a6F4b90ac94Df292fAe521b24b94cE8E58EB91e;
 
   mapping(address => mapping(address => uint24)) public uniswapPoolFees;
 
   IComet public comet;
   IWETH9 weth = IWETH9(WETH);
   ISwapRouter02 swapRouter = ISwapRouter02(SWAP_ROUTER);
+  IApi3ServerV1OevExtension oevExtension = IApi3ServerV1OevExtension(API3_SERVER_V1_OEV_EXTENSION);
 
   struct LiquidateParams {
     address[] liquidatableAccounts;
     uint256[] maxAmountsToPurchase;
     uint256 liquidationThreshold;
+  }
+
+  struct PayBidAndUpdateFeedsAndLiquidateParams {
+    uint32 signedDataTimestampCutoff;
+    bytes signature;
+    uint256 bidAmount;
+    PayOevBidCallbackData payOevBidCallbackData;
+  }
+
+  struct PayOevBidCallbackData {
+    LiquidateParams liquidateParams;
+    bytes[][] signedDataArray;
   }
 
   struct SwapCallbackData {
@@ -120,61 +137,45 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
     }
   }
 
+  /// @notice This serves for simulating profit from liquidations via staticcall
   function liquidate(LiquidateParams calldata params) external returns (uint256, uint256) {
-    address[] memory accountToAbsorb = new address[](1);
-    for (uint8 i; i < params.liquidatableAccounts.length; ++i) {
-      accountToAbsorb[0] = params.liquidatableAccounts[i];
+    uint256 ethBalanceBefore = address(this).balance;
 
-      try comet.absorb(msg.sender, accountToAbsorb) {} catch {
-        emit AbsorbFailed(accountToAbsorb[0]);
-      }
-    }
+    _liquidate(params);
 
-    uint8 numberOfAssets = comet.numAssets();
-    IComet.AssetInfo memory wethAsset;
-    address[] memory assets = new address[](numberOfAssets);
-    for (uint8 i; i < numberOfAssets; ++i) {
-      IComet.AssetInfo memory assetInfo = comet.getAssetInfo(i);
-      assets[i] = assetInfo.asset;
-      if (assetInfo.asset == WETH) {
-        wethAsset = assetInfo;
-      }
-    }
+    _withdrawWeth();
 
-    uint256 flashSwapAmount;
-    uint256[] memory assetBaseAmounts = new uint256[](assets.length);
-    for (uint8 i; i < assets.length; ++i) {
-      (, uint256 collateralBalanceInBase) = _purchasableBalanceOfAsset(assets[i], params.maxAmountsToPurchase[i]);
-      if (collateralBalanceInBase > params.liquidationThreshold) {
-        flashSwapAmount += collateralBalanceInBase;
-        assetBaseAmounts[i] = collateralBalanceInBase;
-      }
-    }
+    return _transferProfit(ethBalanceBefore);
+  }
 
-    require(flashSwapAmount > 0, 'No collateral to buy.');
+  /// @notice Pays OEV bid, updates OEV data feeds, performs liquidations accounts and withdraws ETH to `profitReceiver`
+  function payBidAndUpdateFeedsAndLiquidate(
+    PayBidAndUpdateFeedsAndLiquidateParams calldata params
+  ) external returns (uint256, uint256) {
+    uint256 ethBalanceBefore = address(this).balance;
 
-    bool zeroForOne = WETH < USDC; // tokenIn < tokenOut
-    PoolAddress.PoolKey memory poolKey = _getFlashSwapPoolKey(USDC, WETH);
-    IUniswapV3Pool pool = _getFlashSwapPool(poolKey);
-
-    pool.swap(
-      address(this),
-      zeroForOne,
-      -int256(flashSwapAmount),
-      zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
-      abi.encode(SwapCallbackData({ poolKey: poolKey, assets: assets, assetBaseAmounts: assetBaseAmounts }))
+    oevExtension.payOevBid(
+      DAPP_ID,
+      params.signedDataTimestampCutoff,
+      params.signature,
+      params.bidAmount,
+      abi.encode(params.payOevBidCallbackData)
     );
 
-    uint256 wethBalance = weth.balanceOf(address(this));
-    if (wethBalance > 0) {
-      weth.withdraw(wethBalance);
-    }
+    return _transferProfit(ethBalanceBefore);
+  }
 
-    uint256 profit = address(this).balance;
-    uint256 profitUsd = (profit * comet.getPrice(wethAsset.priceFeed)) / wethAsset.scale;
-    profitReceiver.call{ value: profit }('');
+  /// @notice Callback triggered by calling `payOevBid` on the OEV server extension. Updates data feeds,
+  /// liquidates accounts, and pays back the payment amount owed for the OEV bid.
+  function api3ServerV1OevExtensionPayOevBidCallback(uint256 amountOwed, bytes calldata _data) external override {
+    require(msg.sender == API3_SERVER_V1_OEV_EXTENSION, 'Unauthorized');
 
-    return (profit, profitUsd);
+    PayOevBidCallbackData memory data = abi.decode(_data, (PayOevBidCallbackData));
+    _updateDataFeeds(data.signedDataArray);
+    _liquidate(data.liquidateParams);
+
+    _withdrawWeth();
+    API3_SERVER_V1_OEV_EXTENSION.call{ value: amountOwed }('');
   }
 
   /// @notice Callback for flash swaps through Uniswap V3
@@ -217,6 +218,81 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
     }
 
     weth.transfer(msg.sender, requiredReturnAmount);
+  }
+
+  function _liquidate(LiquidateParams memory params) internal {
+    address[] memory accountToAbsorb = new address[](1);
+    for (uint8 i; i < params.liquidatableAccounts.length; ++i) {
+      accountToAbsorb[0] = params.liquidatableAccounts[i];
+
+      try comet.absorb(msg.sender, accountToAbsorb) {} catch {
+        emit AbsorbFailed(accountToAbsorb[0]);
+      }
+    }
+
+    uint8 numberOfAssets = comet.numAssets();
+    address[] memory assets = new address[](numberOfAssets);
+    for (uint8 i; i < numberOfAssets; ++i) {
+      IComet.AssetInfo memory assetInfo = comet.getAssetInfo(i);
+      assets[i] = assetInfo.asset;
+    }
+
+    uint256 flashSwapAmount;
+    uint256[] memory assetBaseAmounts = new uint256[](assets.length);
+    for (uint8 i; i < assets.length; ++i) {
+      (, uint256 collateralBalanceInBase) = _purchasableBalanceOfAsset(assets[i], params.maxAmountsToPurchase[i]);
+      if (collateralBalanceInBase > params.liquidationThreshold) {
+        flashSwapAmount += collateralBalanceInBase;
+        assetBaseAmounts[i] = collateralBalanceInBase;
+      }
+    }
+
+    require(flashSwapAmount > 0, 'No collateral to buy.');
+
+    bool zeroForOne = WETH < USDC; // tokenIn < tokenOut
+    PoolAddress.PoolKey memory poolKey = _getFlashSwapPoolKey(USDC, WETH);
+    IUniswapV3Pool pool = _getFlashSwapPool(poolKey);
+
+    pool.swap(
+      address(this),
+      zeroForOne,
+      -int256(flashSwapAmount),
+      zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
+      abi.encode(SwapCallbackData({ poolKey: poolKey, assets: assets, assetBaseAmounts: assetBaseAmounts }))
+    );
+  }
+
+  function _updateDataFeeds(bytes[][] memory signedDataArray) internal {
+    uint256 len = signedDataArray.length;
+    for (uint256 i; i < len; ++i) {
+      oevExtension.updateDappOevDataFeed(DAPP_ID, signedDataArray[i]);
+    }
+  }
+
+  function _withdrawWeth() internal {
+    uint256 wethBalance = weth.balanceOf(address(this));
+    if (wethBalance > 0) {
+      weth.withdraw(wethBalance);
+    }
+  }
+
+  function _transferProfit(uint256 ethBalanceBefore) internal returns (uint256, uint256) {
+    uint256 ethBalanceAfter = address(this).balance;
+
+    uint8 numberOfAssets = comet.numAssets();
+    IComet.AssetInfo memory wethAsset;
+    for (uint8 i; i < numberOfAssets; ++i) {
+      IComet.AssetInfo memory assetInfo = comet.getAssetInfo(i);
+      if (assetInfo.asset == WETH) {
+        wethAsset = assetInfo;
+      }
+    }
+
+    uint256 profit = ethBalanceAfter - ethBalanceBefore;
+    uint256 profitUsd = (profit * comet.getPrice(wethAsset.priceFeed)) / wethAsset.scale;
+    profitReceiver.call{ value: profit }('');
+
+    return (profit, profitUsd);
   }
 
   function _purchasableBalanceOfAsset(
