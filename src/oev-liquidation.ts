@@ -1,24 +1,32 @@
 import { readFileSync } from 'node:fs';
 
-import { runInLoop } from '@api3/commons';
+import { type Hex, runInLoop } from '@api3/commons';
 import { go, goSync } from '@api3/promise-utils';
-import { difference, noop } from 'lodash';
+import { difference, noop, zip } from 'lodash';
 
 import {
+  type DataFeed,
+  type DataFeedWithSignedData,
+  deriveOevDataFeeds,
+  encodeSignedDataForOevUpdate,
   fetchDataFeedIds,
   fetchDataFeedsDetails,
-  getBeaconsUpdateCalls,
-  getRealTimeFeedValues,
-  type SignedData,
+  getOevFeedValues,
 } from './beacons';
-import { LIQUIDATION_HARD_TIMEOUT_MS } from './constants';
+import { DAPP_ID, LIQUIDATION_HARD_TIMEOUT_MS, OEV_AWARD_BLOCK_RANGE } from './constants';
 import { env } from './env';
 import { compound3Api3Feeds } from './lib/compound3';
-import { findLiquidatablePositions, liquidatePositions } from './lib/oev-liquidation';
+import {
+  calculateExpectedProfit,
+  findLiquidatablePositions,
+  liquidatePositions,
+  placeBid,
+  reportFulfillment,
+} from './lib/oev-liquidation';
 import { fetchPositionsChunk, filterPositions, POSITIONS_TO_WATCH_FILE_PATH } from './lib/positions';
 import { type Compound3Position, getStorage, initializeStorage, updateStorage } from './lib/storage';
 import { logger } from './logger';
-import { createRunInLoopOptions, fetchPositions, mergePositions } from './utils';
+import { createRunInLoopOptions, fetchPositions, getPercentageValue, mergePositions } from './utils';
 
 interface FilteredPositions {
   currentPositions: Compound3Position[];
@@ -104,39 +112,40 @@ export class Compound3Bot {
     return provider.getBlockNumber();
   }
 
-  getCurrentBeaconSets() {
+  getCurrentDataFeeds() {
     const { api3FeedsToWatch, dataFeedIdToBeacons, dapiNameHashToDataFeedId } = getStorage();
-    const beaconSets = api3FeedsToWatch.map((feed) => {
-      const dataFeedId = dapiNameHashToDataFeedId[feed.dapiNameHash];
-      if (!dataFeedId) {
-        logger.warn('Data feed ID not found for dAPI', { dapiName: feed.dapiName });
-        return [];
-      }
-      const beacons = dataFeedIdToBeacons[dataFeedId];
-      if (!beacons) {
-        logger.warn('Beacons not found for data feed ID', { dataFeedId });
-        return [];
-      }
+    const dataFeeds = api3FeedsToWatch
+      .map((feed): DataFeed | null => {
+        const dataFeedId = dapiNameHashToDataFeedId[feed.dapiNameHash];
+        if (!dataFeedId) {
+          logger.warn('Data feed ID not found for dAPI', { dapiName: feed.dapiName });
+          return null;
+        }
+        const beacons = dataFeedIdToBeacons[dataFeedId];
+        if (!beacons) {
+          logger.warn('Beacons not found for data feed ID', { dataFeedId });
+          return null;
+        }
 
-      return beacons;
-    });
+        return { dataFeedId, beacons };
+      })
+      .filter(Boolean);
 
-    logger.info('Current beacon sets', { count: beaconSets.length });
-    return beaconSets;
+    logger.info('Current data feeds', { count: dataFeeds.length });
+    return dataFeeds;
   }
 
-  async getDataFeedsBeacons() {
-    const { dataFeedIdToBeacons, api3FeedsToWatch } = getStorage();
-    const targetChainConnectors = getStorage().baseConnectors;
+  async refreshDataFeeds() {
+    const { dataFeedIdToBeacons, api3FeedsToWatch, baseConnectors } = getStorage();
 
     // Fetch the data feed ID for all given API3 feeds (dAPIs) in a single RPC call.
     const dataFeedIds = await fetchDataFeedIds(
-      targetChainConnectors.api3ServerV1,
+      baseConnectors.api3ServerV1,
       api3FeedsToWatch.map((feed) => feed.dapiNameHash)
     );
 
     // If the RPC call failed, return the last known beacons for the dAPIs.
-    if (!dataFeedIds) return this.getCurrentBeaconSets().flat();
+    if (!dataFeedIds) return this.getCurrentDataFeeds();
 
     // Persist the current data feed IDs for the dAPIs in storage.
     updateStorage((draft) => {
@@ -148,38 +157,56 @@ export class Compound3Bot {
     // Fetch and persist data feed details for all data feeds that we're missing in storage.
     const missingDataFeedIds = dataFeedIds.filter((feedId) => !(feedId in dataFeedIdToBeacons));
     if (missingDataFeedIds.length > 0) {
-      const dataFeedDetails = await fetchDataFeedsDetails(targetChainConnectors.airseekerRegistry, missingDataFeedIds);
+      const dataFeedDetails = await fetchDataFeedsDetails(baseConnectors.airseekerRegistry, missingDataFeedIds);
       if (dataFeedDetails) {
         updateStorage((draft) => {
-          for (const [i, dataFeedDetail] of dataFeedDetails.entries()) {
-            if (dataFeedDetail) draft.dataFeedIdToBeacons[missingDataFeedIds[i]!] = dataFeedDetail;
+          for (const [dataFeedId, dataFeedDetail] of Object.entries(dataFeedDetails)) {
+            if (dataFeedDetail) draft.dataFeedIdToBeacons[dataFeedId as Hex] = dataFeedDetail;
           }
         });
       }
     }
 
-    // Get the beacons for all the data feeds. Note, that the call needs to get the fresh state, because the steps above
-    // may update the dAPI details.
-    return this.getCurrentBeaconSets().flat();
+    return this.getCurrentDataFeeds();
   }
 
-  async getRealTimeFeedUpdateCalls(realTimeFeedValues: SignedData[]) {
-    const { api3ServerV1 } = getStorage().baseConnectors;
-    const api3ServerAddress = await api3ServerV1.getAddress();
-    const beaconsUpdateCalls = getBeaconsUpdateCalls(api3ServerV1, api3ServerAddress, realTimeFeedValues);
-    const beaconSets = this.getCurrentBeaconSets();
+  deriveOevDataFeeds(dataFeeds: DataFeed[]) {
+    const newDataFeeds = dataFeeds.filter((dataFeed) => !(dataFeed.dataFeedId in getStorage().dataFeedIdToOevDataFeed));
+    const newOevDataFeeds = deriveOevDataFeeds(newDataFeeds);
 
-    const beaconSetsUpdateCalls = beaconSets
-      .filter((beaconSet) => beaconSet.length > 1)
-      .map((beaconSet) => ({
-        target: api3ServerAddress,
-        allowFailure: true, // We're allowing failure in case a liquidation can still be made.
-        callData: api3ServerV1.interface.encodeFunctionData('updateBeaconSetWithBeacons', [
-          beaconSet.map(({ beaconId }) => beaconId),
-        ]),
-      }));
+    if (newDataFeeds.length > 0) {
+      updateStorage((draft) => {
+        // eslint-disable-next-line unicorn/no-for-loop
+        for (let index = 0; index < newDataFeeds.length; index++) {
+          draft.dataFeedIdToOevDataFeed[newDataFeeds[index]!.dataFeedId as Hex] = newOevDataFeeds[index]!;
+        }
+      });
+    }
 
-    return [...beaconsUpdateCalls, ...beaconSetsUpdateCalls];
+    return dataFeeds.map(({ dataFeedId }) => getStorage().dataFeedIdToOevDataFeed[dataFeedId]!);
+  }
+
+  getDappOevUpdateDataFeedSignedData(
+    dataFeeds: DataFeed[], // NOTE: This expects the base data feeds to be passed (not the OEV derived ones).
+    oevDataFeedValues: DataFeedWithSignedData[]
+  ): string[][] {
+    return zip(dataFeeds, oevDataFeedValues).map(([dataFeed, oevDataFeedValue]) =>
+      encodeSignedDataForOevUpdate(dataFeed!, oevDataFeedValue!)
+    );
+  }
+
+  async getDappOevDataFeedSimulateCalls(signedDataArray: string[][]): Promise<string[]> {
+    const { api3ServerV1OevExtension } = getStorage().baseConnectors;
+
+    return signedDataArray.map((signedData) =>
+      api3ServerV1OevExtension.interface.encodeFunctionData('simulateDappOevDataFeedUpdate', [DAPP_ID, signedData])
+    );
+  }
+
+  cleanupLiquidationAttempt() {
+    updateStorage((draft) => {
+      draft.currentlyLiquidatedPositions = [];
+    });
   }
 
   async onFetchAndFilterNewPositions() {
@@ -272,49 +299,119 @@ export class Compound3Bot {
   }
 
   async onInitiateOevLiquidations() {
-    const { currentlyLiquidatedPositions } = getStorage();
+    const { currentlyLiquidatedPositions, oevNetworkConnectors } = getStorage();
 
     if (currentlyLiquidatedPositions.length > 0) {
       logger.info('Skipping liquidation as another liquidation is in progress.', { currentlyLiquidatedPositions });
       return;
     }
 
-    const dataFeedBeacons = await this.getDataFeedsBeacons();
-    if (!dataFeedBeacons) return;
+    const dataFeeds = await this.refreshDataFeeds();
+    const oevDataFeeds = this.deriveOevDataFeeds(dataFeeds);
+    const oevFeedValues = await getOevFeedValues(oevDataFeeds, env.SIGNED_API_FETCH_DELAY_MS);
+    const signedDataArray = this.getDappOevUpdateDataFeedSignedData(dataFeeds, oevFeedValues);
+    const dapiSimulateUpdateCalls = await this.getDappOevDataFeedSimulateCalls(signedDataArray);
+    const liquidatablePositions = await findLiquidatablePositions(dapiSimulateUpdateCalls);
+    const positionsToLiquidate = liquidatablePositions.slice(0, env.MAX_POSITIONS_TO_LIQUIDATE);
 
-    const realTimeFeedValues = await getRealTimeFeedValues(dataFeedBeacons, env.SIGNED_API_FETCH_DELAY_MS);
-    const dapiUpdateCalls = await this.getRealTimeFeedUpdateCalls(realTimeFeedValues);
-    const liquidatablePositions = await findLiquidatablePositions(dapiUpdateCalls);
+    if (positionsToLiquidate.length === 0) {
+      logger.info('No liquidations found.');
+      return;
+    }
+
+    const expectedProfit = await calculateExpectedProfit(dapiSimulateUpdateCalls, positionsToLiquidate);
+    const bidAmount = getPercentageValue(expectedProfit, 80);
+    const placedBid = await placeBid(bidAmount);
+    if (!placedBid) {
+      return; // Failure already logged
+    }
+    const { bidId, bidTopic, bidDetailsHash, signedDataTimestampCutoff } = placedBid;
+    const positions = positionsToLiquidate.map(({ position }) => position);
+
+    updateStorage((draft) => {
+      draft.currentlyLiquidatedPositions = positions;
+    });
 
     setTimeout(async () => {
-      const positionsToLiquidate = liquidatablePositions.slice(0, env.MAX_POSITIONS_TO_LIQUIDATE);
+      const awardedBidFilter = oevNetworkConnectors.oevAuctionHouse.filters.AwardedBid(undefined, bidTopic);
+      const goAwardedBid = await go(
+        async () => {
+          const blockNumber = await oevNetworkConnectors.provider.getBlockNumber();
+          const awardedBid = await oevNetworkConnectors.oevAuctionHouse.queryFilter(
+            awardedBidFilter,
+            blockNumber - OEV_AWARD_BLOCK_RANGE,
+            blockNumber
+          );
+          if (awardedBid.length === 0) throw new Error('No award found in this polling attempt');
+          return awardedBid[0]!;
+        },
+        {
+          retries: 25,
+          delay: {
+            type: 'static',
+            delayMs: env.OEV_POLL_AWARD_BID_DELAY_MS,
+          },
+        }
+      );
 
-      if (positionsToLiquidate.length === 0) {
-        logger.info('No liquidations found.');
+      if (goAwardedBid.error) {
+        logger.error('Failed to poll awarded bid', goAwardedBid.error);
+        this.cleanupLiquidationAttempt();
+        return;
+      }
+      if (goAwardedBid.data.args.bidId !== bidId) {
+        logger.error('Unexpected bid won the auction', { winningBidId: goAwardedBid.data.args.bidId, bidId });
+        this.cleanupLiquidationAttempt();
         return;
       }
 
-      const liquidatedPositions = positionsToLiquidate.map(({ position }) => position);
-
       logger.info('Attempting liquidation(s)', {
-        positions: liquidatedPositions,
+        positions,
       });
 
-      updateStorage((draft) => {
-        draft.currentlyLiquidatedPositions = liquidatedPositions;
-      });
+      const goLiquidate = await go(
+        () =>
+          liquidatePositions(
+            positionsToLiquidate,
+            bidAmount,
+            goAwardedBid.data.args.awardDetails,
+            signedDataArray,
+            signedDataTimestampCutoff
+          ),
+        {
+          totalTimeoutMs: LIQUIDATION_HARD_TIMEOUT_MS,
+        }
+      );
 
-      const goLiquidate = await go(() => liquidatePositions(positionsToLiquidate, dapiUpdateCalls), {
-        totalTimeoutMs: LIQUIDATION_HARD_TIMEOUT_MS,
-      });
-
-      updateStorage((draft) => {
-        draft.currentlyLiquidatedPositions = [];
-      });
+      this.cleanupLiquidationAttempt();
 
       if (goLiquidate.error) {
         logger.error('Unexpected liquidation error', goLiquidate.error);
       }
+
+      const txReceipt = goLiquidate.data;
+      if (!txReceipt || txReceipt.status === 0) {
+        // The error has been already handled, so this is an expected case.
+        logger.info('Not reporting fulfillment because the transaction was aborted or failed');
+        return;
+      }
+
+      const goReportFulfillment = await go(
+        () =>
+          reportFulfillment({
+            bidTopic,
+            bidDetailsHash,
+            fulfillmentDetails: txReceipt.hash,
+          }),
+        {
+          totalTimeoutMs: env.OEV_REPORT_FULFILLMENT_TIMEOUT_MS,
+        }
+      );
+      if (!goReportFulfillment.success) {
+        logger.error(`Failed to report fulfillment: ${goReportFulfillment.error.message}`);
+        return;
+      }
+      logger.info('Reported fulfillment', { txHash: goReportFulfillment.data.hash });
     }, 0);
   }
 
