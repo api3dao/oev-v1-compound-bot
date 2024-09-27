@@ -42,15 +42,19 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
     address[] liquidatableAccounts;
     uint256[] maxAmountsToPurchase;
     uint256 liquidationThreshold;
+  }
+
+  struct PayBidAndUpdateFeedsAndLiquidateParams {
+    LiquidateParams liquidateParams;
     uint32 signedDataTimestampCutoff;
     bytes signature;
-    uint256 bidValue;
+    uint256 bidAmount;
     bytes[][] signedDataArray;
   }
 
   struct FlashCallbackData {
     PoolAddress.PoolKey poolKey;
-    LiquidateParams params;
+    PayBidAndUpdateFeedsAndLiquidateParams params;
   }
 
   struct SwapCallbackData {
@@ -136,24 +140,30 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
 
   /// @notice This serves for simulating profit from liquidations via staticcall
   function liquidate(LiquidateParams calldata params) external returns (uint256, uint256) {
+    uint256 wethBalanceBefore = weth.balanceOf(address(this));
+
     _liquidate(params);
 
-    return _withdrawWethAndReturnProfit();
+    return _withdrawWethAndReturnProfit(wethBalanceBefore);
   }
 
   /// @notice Pays OEV bid, updates OEV data feeds, performs liquidations accounts and withdraws ETH to `profitReceiver`
-  function payBidAndUpdateFeedsAndLiquidate(LiquidateParams calldata params) external returns (uint256, uint256) {
+  function payBidAndUpdateFeedsAndLiquidate(
+    PayBidAndUpdateFeedsAndLiquidateParams calldata params
+  ) external returns (uint256, uint256) {
+    uint256 wethBalanceBefore = weth.balanceOf(address(this));
+
     PoolAddress.PoolKey memory poolKey = _getFlashSwapPoolKey(USDC, WETH);
     IUniswapV3Pool pool = _getFlashSwapPool(poolKey);
 
     pool.flash(
       address(this),
-      params.bidValue, // token0 = WETH
+      params.bidAmount, // token0 = WETH
       0, // token1 = USDC
       abi.encode(FlashCallbackData({ poolKey: poolKey, params: params }))
     );
 
-    return _withdrawWethAndReturnProfit();
+    return _withdrawWethAndReturnProfit(wethBalanceBefore);
   }
 
   /// @notice Callback for flash loans through Uniswap V3
@@ -161,9 +171,9 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
     FlashCallbackData memory data = abi.decode(_data, (FlashCallbackData));
     CallbackValidation.verifyCallback(UNISWAP_FACTORY, data.poolKey);
 
-    weth.withdraw(data.params.bidValue);
+    weth.withdraw(data.params.bidAmount);
 
-    oevExtension.payOevBid{ value: data.params.bidValue }(
+    oevExtension.payOevBid{ value: data.params.bidAmount }(
       DAPP_ID,
       data.params.signedDataTimestampCutoff,
       data.params.signature
@@ -171,9 +181,9 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
 
     _updateDataFeeds(data.params.signedDataArray);
 
-    _liquidate(data.params);
+    _liquidate(data.params.liquidateParams);
 
-    weth.transfer(msg.sender, data.params.bidValue + fee0);
+    weth.transfer(msg.sender, data.params.bidAmount + fee0);
   }
 
   /// @notice Callback for flash swaps through Uniswap V3
@@ -267,7 +277,7 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
     }
   }
 
-  function _withdrawWethAndReturnProfit() internal returns (uint256, uint256) {
+  function _withdrawWethAndReturnProfit(uint256 wethBalanceBefore) internal returns (uint256, uint256) {
     uint256 wethBalance = weth.balanceOf(address(this));
     if (wethBalance > 0) {
       weth.withdraw(wethBalance);
@@ -282,7 +292,8 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
       }
     }
 
-    uint256 profit = address(this).balance;
+    uint256 wethBalanceAfter = address(this).balance;
+    uint256 profit = wethBalanceAfter - wethBalanceBefore;
     uint256 profitUsd = (profit * comet.getPrice(wethAsset.priceFeed)) / wethAsset.scale;
     profitReceiver.call{ value: profit }('');
 
