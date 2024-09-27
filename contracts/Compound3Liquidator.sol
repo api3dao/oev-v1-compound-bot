@@ -134,7 +134,15 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
     }
   }
 
+  /// @notice This serves for simulating profit from liquidations via staticcall
   function liquidate(LiquidateParams calldata params) external returns (uint256, uint256) {
+    _liquidate(params);
+
+    return _withdrawWethAndReturnProfit();
+  }
+
+  /// @notice Pays OEV bid, updates OEV data feeds, performs liquidations accounts and withdraws ETH to `profitReceiver`
+  function payBidAndUpdateFeedsAndLiquidate(LiquidateParams calldata params) external returns (uint256, uint256) {
     PoolAddress.PoolKey memory poolKey = _getFlashSwapPoolKey(USDC, WETH);
     IUniswapV3Pool pool = _getFlashSwapPool(poolKey);
 
@@ -145,25 +153,7 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
       abi.encode(FlashCallbackData({ poolKey: poolKey, params: params }))
     );
 
-    uint256 wethBalance = weth.balanceOf(address(this));
-    if (wethBalance > 0) {
-      weth.withdraw(wethBalance);
-    }
-
-    uint8 numberOfAssets = comet.numAssets();
-    IComet.AssetInfo memory wethAsset;
-    for (uint8 i; i < numberOfAssets; ++i) {
-      IComet.AssetInfo memory assetInfo = comet.getAssetInfo(i);
-      if (assetInfo.asset == WETH) {
-        wethAsset = assetInfo;
-      }
-    }
-
-    uint256 profit = address(this).balance;
-    uint256 profitUsd = (profit * comet.getPrice(wethAsset.priceFeed)) / wethAsset.scale;
-    profitReceiver.call{ value: profit }('');
-
-    return (profit, profitUsd);
+    return _withdrawWethAndReturnProfit();
   }
 
   /// @notice Callback for flash loans through Uniswap V3
@@ -181,45 +171,7 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
 
     _updateDataFeeds(data.params.signedDataArray);
 
-    address[] memory accountToAbsorb = new address[](1);
-    for (uint8 i; i < data.params.liquidatableAccounts.length; ++i) {
-      accountToAbsorb[0] = data.params.liquidatableAccounts[i];
-
-      try comet.absorb(msg.sender, accountToAbsorb) {} catch {
-        emit AbsorbFailed(accountToAbsorb[0]);
-      }
-    }
-
-    uint8 numberOfAssets = comet.numAssets();
-    address[] memory assets = new address[](numberOfAssets);
-    for (uint8 i; i < numberOfAssets; ++i) {
-      IComet.AssetInfo memory assetInfo = comet.getAssetInfo(i);
-      assets[i] = assetInfo.asset;
-    }
-
-    uint256 flashSwapAmount;
-    uint256[] memory assetBaseAmounts = new uint256[](assets.length);
-    for (uint8 i; i < assets.length; ++i) {
-      (, uint256 collateralBalanceInBase) = _purchasableBalanceOfAsset(assets[i], data.params.maxAmountsToPurchase[i]);
-      if (collateralBalanceInBase > data.params.liquidationThreshold) {
-        flashSwapAmount += collateralBalanceInBase;
-        assetBaseAmounts[i] = collateralBalanceInBase;
-      }
-    }
-
-    require(flashSwapAmount > 0, 'No collateral to buy.');
-
-    bool zeroForOne = WETH < USDC; // tokenIn < tokenOut
-    PoolAddress.PoolKey memory poolKey = _getFlashSwapPoolKey(USDC, WETH);
-    IUniswapV3Pool pool = _getFlashSwapPool(poolKey);
-
-    pool.swap(
-      address(this),
-      zeroForOne,
-      -int256(flashSwapAmount),
-      zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
-      abi.encode(SwapCallbackData({ poolKey: poolKey, assets: assets, assetBaseAmounts: assetBaseAmounts }))
-    );
+    _liquidate(data.params);
 
     weth.transfer(msg.sender, data.params.bidValue + fee0);
   }
@@ -266,11 +218,75 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
     weth.transfer(msg.sender, requiredReturnAmount);
   }
 
+  function _liquidate(LiquidateParams memory params) internal {
+    address[] memory accountToAbsorb = new address[](1);
+    for (uint8 i; i < params.liquidatableAccounts.length; ++i) {
+      accountToAbsorb[0] = params.liquidatableAccounts[i];
+
+      try comet.absorb(msg.sender, accountToAbsorb) {} catch {
+        emit AbsorbFailed(accountToAbsorb[0]);
+      }
+    }
+
+    uint8 numberOfAssets = comet.numAssets();
+    address[] memory assets = new address[](numberOfAssets);
+    for (uint8 i; i < numberOfAssets; ++i) {
+      IComet.AssetInfo memory assetInfo = comet.getAssetInfo(i);
+      assets[i] = assetInfo.asset;
+    }
+
+    uint256 flashSwapAmount;
+    uint256[] memory assetBaseAmounts = new uint256[](assets.length);
+    for (uint8 i; i < assets.length; ++i) {
+      (, uint256 collateralBalanceInBase) = _purchasableBalanceOfAsset(assets[i], params.maxAmountsToPurchase[i]);
+      if (collateralBalanceInBase > params.liquidationThreshold) {
+        flashSwapAmount += collateralBalanceInBase;
+        assetBaseAmounts[i] = collateralBalanceInBase;
+      }
+    }
+
+    require(flashSwapAmount > 0, 'No collateral to buy.');
+
+    bool zeroForOne = WETH < USDC; // tokenIn < tokenOut
+    PoolAddress.PoolKey memory poolKey = _getFlashSwapPoolKey(USDC, WETH);
+    IUniswapV3Pool pool = _getFlashSwapPool(poolKey);
+
+    pool.swap(
+      address(this),
+      zeroForOne,
+      -int256(flashSwapAmount),
+      zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
+      abi.encode(SwapCallbackData({ poolKey: poolKey, assets: assets, assetBaseAmounts: assetBaseAmounts }))
+    );
+  }
+
   function _updateDataFeeds(bytes[][] memory signedDataArray) internal {
     uint256 len = signedDataArray.length;
     for (uint256 i; i < len; ++i) {
       oevExtension.updateDappOevDataFeed(DAPP_ID, signedDataArray[i]);
     }
+  }
+
+  function _withdrawWethAndReturnProfit() internal returns (uint256, uint256) {
+    uint256 wethBalance = weth.balanceOf(address(this));
+    if (wethBalance > 0) {
+      weth.withdraw(wethBalance);
+    }
+
+    uint8 numberOfAssets = comet.numAssets();
+    IComet.AssetInfo memory wethAsset;
+    for (uint8 i; i < numberOfAssets; ++i) {
+      IComet.AssetInfo memory assetInfo = comet.getAssetInfo(i);
+      if (assetInfo.asset == WETH) {
+        wethAsset = assetInfo;
+      }
+    }
+
+    uint256 profit = address(this).balance;
+    uint256 profitUsd = (profit * comet.getPrice(wethAsset.priceFeed)) / wethAsset.scale;
+    profitReceiver.call{ value: profit }('');
+
+    return (profit, profitUsd);
   }
 
   function _purchasableBalanceOfAsset(
