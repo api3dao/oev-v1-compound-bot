@@ -1,6 +1,6 @@
 import { sleep } from '@api3/commons';
 import { go } from '@api3/promise-utils';
-import { ethers, MaxUint256, VoidSigner } from 'ethers';
+import { ethers, formatEther, formatUnits, MaxUint256, VoidSigner } from 'ethers';
 import { chunk, orderBy } from 'lodash';
 
 import { type Compound3Liquidator, type IComet } from '../../typechain-types';
@@ -123,6 +123,7 @@ export const calculateExpectedProfit = async (
   const liquidatorAddress = await compound3Liquidator.getAddress();
 
   let totalProfit = 0n;
+  let totalProfitUsd = 0n;
   for (const batch of chunk(liquidatablePositions, env.MAX_SIMULATE_LIQUIDATIONS_MULTICALL)) {
     const calls = [
       ...dapiUpdateCalls,
@@ -159,16 +160,21 @@ export const calculateExpectedProfit = async (
     }
 
     // Parse the returndata from the staticcall (excluding the dAPI update calls).
-    const [profit, _profitUsd] = compound3Liquidator.interface.decodeFunctionResult(
+    const [profit, profitUsd] = compound3Liquidator.interface.decodeFunctionResult(
       'liquidate',
-      liquidateCallResultReturnData
+      api3ServerV1OevExtension.interface.decodeFunctionResult('simulateExternalCall', liquidateCallResultReturnData)[0]
     ) as unknown as [bigint, bigint];
 
     totalProfit += profit;
+    totalProfitUsd += profitUsd;
 
     await sleep(env.MIN_RPC_DELAY_MS);
   }
 
+  logger.info('Total expected profit', {
+    totalProfit: formatEther(totalProfit),
+    totalProfitUsd: formatUnits(totalProfitUsd, 8),
+  });
   return totalProfit;
 };
 
