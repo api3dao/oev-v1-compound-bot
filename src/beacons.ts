@@ -8,8 +8,6 @@ import { go } from '@api3/promise-utils';
 import { ethers } from 'ethers';
 import { groupBy } from 'lodash';
 
-import { type Multicall3 } from '../typechain-types';
-
 import { API3_SIGNED_API_BASE_URL, NODARY_SIGNED_API_BASE_URL } from './constants';
 import { logger } from './logger';
 
@@ -43,9 +41,10 @@ const decodeDataFeedDetails = (dataFeed: string): Beacon[] | null => {
   if (dataFeed.length === 2 + 32 * 2 + 32 * 2) {
     const [airnodeAddress, templateId] = ethers.AbiCoder.defaultAbiCoder().decode(['address', 'bytes32'], dataFeed);
 
-    const dataFeedId = deriveBeaconId(airnodeAddress, templateId) as Address;
+    const oevTemplateId = ethers.solidityPackedKeccak256(['bytes32'], [templateId]) as Hex;
+    const dataFeedId = deriveBeaconId(airnodeAddress, oevTemplateId) as Address;
 
-    return [{ beaconId: dataFeedId, airnodeAddress, templateId }];
+    return [{ beaconId: dataFeedId, airnodeAddress, templateId: oevTemplateId }];
   }
 
   const [airnodeAddresses, templateIds] = ethers.AbiCoder.defaultAbiCoder().decode(
@@ -55,9 +54,10 @@ const decodeDataFeedDetails = (dataFeed: string): Beacon[] | null => {
 
   const beacons = (airnodeAddresses as Address[]).map((airnodeAddress, idx) => {
     const templateId = templateIds[idx] as Hex;
-    const beaconId = deriveBeaconId(airnodeAddress, templateId) as Address;
+    const oevTemplateId = ethers.solidityPackedKeccak256(['bytes32'], [templateId]) as Hex;
+    const beaconId = deriveBeaconId(airnodeAddress, oevTemplateId) as Address;
 
-    return { beaconId, airnodeAddress, templateId };
+    return { beaconId, airnodeAddress, templateId: oevTemplateId };
   });
 
   return beacons;
@@ -186,19 +186,16 @@ export const getRealTimeFeedValues = async (
   return signedApiBeaconsDataPerAirnode.flat();
 };
 
-export const getBeaconsUpdateCalls = (
-  api3ServerV1: Api3ServerV1,
-  api3ServerAddress: string,
-  realTimeFeedValues: SignedData[]
-): Multicall3.Call3Struct[] =>
-  realTimeFeedValues.map(({ airnode, templateId, timestamp, encodedValue, signature }) => ({
-    target: api3ServerAddress,
-    allowFailure: true,
-    callData: api3ServerV1.interface.encodeFunctionData('updateBeaconWithSignedData', [
-      airnode,
-      templateId,
-      timestamp,
-      encodedValue,
-      signature,
-    ]),
-  }));
+export const getUpdateDataFeedSignedData = (realTimeFeedValues: SignedData[], beaconSets: Beacon[][]): string[][] =>
+  beaconSets.map((beaconSet) => {
+    const beacons = new Set(beaconSet.map((beacon) => beacon.beaconId));
+    const signedData = realTimeFeedValues
+      .filter((values) => beacons.has(values.beaconId))
+      .map(({ airnode, templateId, timestamp, encodedValue, signature }) =>
+        ethers.AbiCoder.defaultAbiCoder().encode(
+          ['address', 'bytes32', 'uint256', 'bytes', 'bytes'],
+          [airnode, templateId, timestamp, encodedValue, signature]
+        )
+      );
+    return signedData;
+  });

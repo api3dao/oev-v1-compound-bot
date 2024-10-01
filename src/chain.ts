@@ -8,7 +8,12 @@ import {
 } from '@api3/contracts';
 import { ethers, type Wallet } from 'ethers';
 
-import { type Multicall3, Multicall3__factory as Multicall3Factory } from '../typechain-types';
+import {
+  type IApi3ServerV1OevExtension,
+  IApi3ServerV1OevExtension__factory as IApi3ServerV1OevExtensionFactory,
+  type Multicall3,
+  Multicall3__factory as Multicall3Factory,
+} from '../typechain-types';
 
 export const baseContractAddresses = {
   api3OevCbethEthProxy: '0x7583f6435cAD95bcF30C2dD7fDbfD3c5Ab58Ce4C',
@@ -17,6 +22,7 @@ export const baseContractAddresses = {
   api3OevStethUsdProxy: '0x93d2D4Aae8143E2a067a54C8138Dc8054Ad79910',
   api3OevUsdcUsdProxy: '0x773f1a8E77Bd9e91a84bD80Bf35e67e4989D5C4C',
   api3ServerV1: '0x709944a48cAf83535e43471680fDA4905FB3920a',
+  api3ServerV1OevExtension: '0xF930D1E37098128326F8731a476347f0840337cA',
   multicall3: '0xcA11bde05977b3631167028862bE2a173976CA11',
 } as const;
 
@@ -25,6 +31,7 @@ const network = new ethers.Network('base', hardhatConfig.networks().base!.chainI
 export interface BaseConnectors {
   provider: ethers.JsonRpcProvider;
   api3ServerV1: Api3ServerV1;
+  api3ServerV1OevExtension: IApi3ServerV1OevExtension;
   airseekerRegistry: AirseekerRegistry;
   wallet: Wallet;
   multicall3: Multicall3;
@@ -41,6 +48,10 @@ export const createBaseConnectors = (wallet: ethers.Wallet, rpcUrl: string): Bas
     provider,
     multicall3: Multicall3Factory.connect(baseContractAddresses.multicall3, provider),
     api3ServerV1: Api3ServerV1Factory.connect(baseContractAddresses.api3ServerV1, provider),
+    api3ServerV1OevExtension: IApi3ServerV1OevExtensionFactory.connect(
+      baseContractAddresses.api3ServerV1OevExtension,
+      provider
+    ),
     airseekerRegistry: AirseekerRegistryFactory.connect(
       computeApi3MarketAirseekerRegistryAddress(hardhatConfig.networks().base!.chainId),
       provider

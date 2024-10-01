@@ -7,18 +7,23 @@ import { difference, noop } from 'lodash';
 import {
   fetchDataFeedIds,
   fetchDataFeedsDetails,
-  getBeaconsUpdateCalls,
   getRealTimeFeedValues,
+  getUpdateDataFeedSignedData,
   type SignedData,
 } from './beacons';
-import { LIQUIDATION_HARD_TIMEOUT_MS } from './constants';
+import { DAPP_ID, LIQUIDATION_HARD_TIMEOUT_MS, OEV_AWARD_BLOCK_RANGE } from './constants';
 import { env } from './env';
 import { compound3Api3Feeds } from './lib/compound3';
-import { findLiquidatablePositions, liquidatePositions } from './lib/oev-liquidation';
+import {
+  calculateExpectedProfit,
+  findLiquidatablePositions,
+  liquidatePositions,
+  placeBid,
+} from './lib/oev-liquidation';
 import { fetchPositionsChunk, filterPositions, POSITIONS_TO_WATCH_FILE_PATH } from './lib/positions';
 import { type Compound3Position, getStorage, initializeStorage, updateStorage } from './lib/storage';
 import { logger } from './logger';
-import { createRunInLoopOptions, fetchPositions, mergePositions } from './utils';
+import { createRunInLoopOptions, fetchPositions, getPercentageValue, mergePositions } from './utils';
 
 interface FilteredPositions {
   currentPositions: Compound3Position[];
@@ -163,23 +168,17 @@ export class Compound3Bot {
     return this.getCurrentBeaconSets().flat();
   }
 
-  async getRealTimeFeedUpdateCalls(realTimeFeedValues: SignedData[]) {
-    const { api3ServerV1 } = getStorage().baseConnectors;
-    const api3ServerAddress = await api3ServerV1.getAddress();
-    const beaconsUpdateCalls = getBeaconsUpdateCalls(api3ServerV1, api3ServerAddress, realTimeFeedValues);
+  getDappOevUpdateDataFeedSignedData(realTimeFeedValues: SignedData[]): string[][] {
     const beaconSets = this.getCurrentBeaconSets();
+    return getUpdateDataFeedSignedData(realTimeFeedValues, beaconSets);
+  }
 
-    const beaconSetsUpdateCalls = beaconSets
-      .filter((beaconSet) => beaconSet.length > 1)
-      .map((beaconSet) => ({
-        target: api3ServerAddress,
-        allowFailure: true, // We're allowing failure in case a liquidation can still be made.
-        callData: api3ServerV1.interface.encodeFunctionData('updateBeaconSetWithBeacons', [
-          beaconSet.map(({ beaconId }) => beaconId),
-        ]),
-      }));
+  async getDappOevDataFeedSimulateCalls(signedDataArray: string[][]): Promise<string[]> {
+    const { api3ServerV1OevExtension } = getStorage().baseConnectors;
 
-    return [...beaconsUpdateCalls, ...beaconSetsUpdateCalls];
+    return signedDataArray.map((signedData) =>
+      api3ServerV1OevExtension.interface.encodeFunctionData('simulateDappOevDataFeedUpdate', [DAPP_ID, signedData])
+    );
   }
 
   async onFetchAndFilterNewPositions() {
@@ -272,7 +271,7 @@ export class Compound3Bot {
   }
 
   async onInitiateOevLiquidations() {
-    const { currentlyLiquidatedPositions } = getStorage();
+    const { currentlyLiquidatedPositions, oevNetworkConnectors } = getStorage();
 
     if (currentlyLiquidatedPositions.length > 0) {
       logger.info('Skipping liquidation as another liquidation is in progress.', { currentlyLiquidatedPositions });
@@ -283,30 +282,77 @@ export class Compound3Bot {
     if (!dataFeedBeacons) return;
 
     const realTimeFeedValues = await getRealTimeFeedValues(dataFeedBeacons, env.SIGNED_API_FETCH_DELAY_MS);
-    const dapiUpdateCalls = await this.getRealTimeFeedUpdateCalls(realTimeFeedValues);
-    const liquidatablePositions = await findLiquidatablePositions(dapiUpdateCalls);
+    const signedDataArray = this.getDappOevUpdateDataFeedSignedData(realTimeFeedValues);
+    const dapiSimulateUpdateCalls = await this.getDappOevDataFeedSimulateCalls(signedDataArray);
+    const liquidatablePositions = await findLiquidatablePositions(dapiSimulateUpdateCalls);
+    const positionsToLiquidate = liquidatablePositions.slice(0, env.MAX_POSITIONS_TO_LIQUIDATE);
+
+    if (positionsToLiquidate.length === 0) {
+      logger.info('No liquidations found.');
+      return;
+    }
+
+    const expectedProfit = await calculateExpectedProfit(dapiSimulateUpdateCalls, positionsToLiquidate);
+    const bidAmount = getPercentageValue(expectedProfit, 80);
+    const placedBid = await placeBid(bidAmount);
+    if (!placedBid) {
+      return; // Failure already logged
+    }
+    const { bidId, bidTopic, signedDataTimestampCutoff } = placedBid;
+    const positions = positionsToLiquidate.map(({ position }) => position);
+
+    updateStorage((draft) => {
+      draft.currentlyLiquidatedPositions = positions;
+    });
 
     setTimeout(async () => {
-      const positionsToLiquidate = liquidatablePositions.slice(0, env.MAX_POSITIONS_TO_LIQUIDATE);
+      const awardedBidFilter = oevNetworkConnectors.oevAuctionHouse.filters.AwardedBid(undefined, bidTopic);
+      const goAwardedBid = await go(
+        async () => {
+          const blockNumber = await oevNetworkConnectors.provider.getBlockNumber();
+          const awardedBid = await oevNetworkConnectors.oevAuctionHouse.queryFilter(
+            awardedBidFilter,
+            blockNumber - OEV_AWARD_BLOCK_RANGE,
+            blockNumber
+          );
+          if (awardedBid.length === 0) throw new Error('No award found in this polling attempt');
+          return awardedBid[0]!;
+        },
+        {
+          retries: 25,
+          delay: {
+            type: 'static',
+            delayMs: env.OEV_POLL_AWARD_BID_DELAY_MS,
+          },
+        }
+      );
 
-      if (positionsToLiquidate.length === 0) {
-        logger.info('No liquidations found.');
+      if (goAwardedBid.error) {
+        logger.error('Failed to poll awarded bid', goAwardedBid.error);
+        return;
+      }
+      if (goAwardedBid.data.args.bidId !== bidId) {
+        logger.error('Unexpected bid won the auction', { winningBidId: goAwardedBid.data.args.bidId, bidId });
         return;
       }
 
-      const liquidatedPositions = positionsToLiquidate.map(({ position }) => position);
-
       logger.info('Attempting liquidation(s)', {
-        positions: liquidatedPositions,
+        positions,
       });
 
-      updateStorage((draft) => {
-        draft.currentlyLiquidatedPositions = liquidatedPositions;
-      });
-
-      const goLiquidate = await go(() => liquidatePositions(positionsToLiquidate, dapiUpdateCalls), {
-        totalTimeoutMs: LIQUIDATION_HARD_TIMEOUT_MS,
-      });
+      const goLiquidate = await go(
+        () =>
+          liquidatePositions(
+            positionsToLiquidate,
+            bidAmount,
+            goAwardedBid.data.args.awardDetails,
+            signedDataArray,
+            signedDataTimestampCutoff
+          ),
+        {
+          totalTimeoutMs: LIQUIDATION_HARD_TIMEOUT_MS,
+        }
+      );
 
       updateStorage((draft) => {
         draft.currentlyLiquidatedPositions = [];
