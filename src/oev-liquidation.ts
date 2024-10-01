@@ -1,15 +1,17 @@
 import { readFileSync } from 'node:fs';
 
-import { runInLoop } from '@api3/commons';
+import { type Hex, runInLoop } from '@api3/commons';
 import { go, goSync } from '@api3/promise-utils';
-import { difference, noop } from 'lodash';
+import { difference, noop, zip } from 'lodash';
 
 import {
+  type DataFeed,
+  type DataFeedWithSignedData,
+  deriveOevDataFeeds,
+  encodeSignedDataForOevUpdate,
   fetchDataFeedIds,
   fetchDataFeedsDetails,
-  getRealTimeFeedValues,
-  getUpdateDataFeedSignedData,
-  type SignedData,
+  getOevFeedValues,
 } from './beacons';
 import { DAPP_ID, LIQUIDATION_HARD_TIMEOUT_MS, OEV_AWARD_BLOCK_RANGE } from './constants';
 import { env } from './env';
@@ -109,39 +111,40 @@ export class Compound3Bot {
     return provider.getBlockNumber();
   }
 
-  getCurrentBeaconSets() {
+  getCurrentDataFeeds() {
     const { api3FeedsToWatch, dataFeedIdToBeacons, dapiNameHashToDataFeedId } = getStorage();
-    const beaconSets = api3FeedsToWatch.map((feed) => {
-      const dataFeedId = dapiNameHashToDataFeedId[feed.dapiNameHash];
-      if (!dataFeedId) {
-        logger.warn('Data feed ID not found for dAPI', { dapiName: feed.dapiName });
-        return [];
-      }
-      const beacons = dataFeedIdToBeacons[dataFeedId];
-      if (!beacons) {
-        logger.warn('Beacons not found for data feed ID', { dataFeedId });
-        return [];
-      }
+    const dataFeeds = api3FeedsToWatch
+      .map((feed): DataFeed | null => {
+        const dataFeedId = dapiNameHashToDataFeedId[feed.dapiNameHash];
+        if (!dataFeedId) {
+          logger.warn('Data feed ID not found for dAPI', { dapiName: feed.dapiName });
+          return null;
+        }
+        const beacons = dataFeedIdToBeacons[dataFeedId];
+        if (!beacons) {
+          logger.warn('Beacons not found for data feed ID', { dataFeedId });
+          return null;
+        }
 
-      return beacons;
-    });
+        return { dataFeedId, beacons };
+      })
+      .filter(Boolean);
 
-    logger.info('Current beacon sets', { count: beaconSets.length });
-    return beaconSets;
+    logger.info('Current data feeds', { count: dataFeeds.length });
+    return dataFeeds;
   }
 
-  async getDataFeedsBeacons() {
-    const { dataFeedIdToBeacons, api3FeedsToWatch } = getStorage();
-    const targetChainConnectors = getStorage().baseConnectors;
+  async refreshDataFeeds() {
+    const { dataFeedIdToBeacons, api3FeedsToWatch, baseConnectors } = getStorage();
 
     // Fetch the data feed ID for all given API3 feeds (dAPIs) in a single RPC call.
     const dataFeedIds = await fetchDataFeedIds(
-      targetChainConnectors.api3ServerV1,
+      baseConnectors.api3ServerV1,
       api3FeedsToWatch.map((feed) => feed.dapiNameHash)
     );
 
     // If the RPC call failed, return the last known beacons for the dAPIs.
-    if (!dataFeedIds) return this.getCurrentBeaconSets().flat();
+    if (!dataFeedIds) return this.getCurrentDataFeeds();
 
     // Persist the current data feed IDs for the dAPIs in storage.
     updateStorage((draft) => {
@@ -153,24 +156,42 @@ export class Compound3Bot {
     // Fetch and persist data feed details for all data feeds that we're missing in storage.
     const missingDataFeedIds = dataFeedIds.filter((feedId) => !(feedId in dataFeedIdToBeacons));
     if (missingDataFeedIds.length > 0) {
-      const dataFeedDetails = await fetchDataFeedsDetails(targetChainConnectors.airseekerRegistry, missingDataFeedIds);
+      const dataFeedDetails = await fetchDataFeedsDetails(baseConnectors.airseekerRegistry, missingDataFeedIds);
       if (dataFeedDetails) {
         updateStorage((draft) => {
-          for (const [i, dataFeedDetail] of dataFeedDetails.entries()) {
-            if (dataFeedDetail) draft.dataFeedIdToBeacons[missingDataFeedIds[i]!] = dataFeedDetail;
+          for (const [dataFeedId, dataFeedDetail] of Object.entries(dataFeedDetails)) {
+            if (dataFeedDetail) draft.dataFeedIdToBeacons[dataFeedId as Hex] = dataFeedDetail;
           }
         });
       }
     }
 
-    // Get the beacons for all the data feeds. Note, that the call needs to get the fresh state, because the steps above
-    // may update the dAPI details.
-    return this.getCurrentBeaconSets().flat();
+    return this.getCurrentDataFeeds();
   }
 
-  getDappOevUpdateDataFeedSignedData(realTimeFeedValues: SignedData[]): string[][] {
-    const beaconSets = this.getCurrentBeaconSets();
-    return getUpdateDataFeedSignedData(realTimeFeedValues, beaconSets);
+  deriveOevDataFeeds(dataFeeds: DataFeed[]) {
+    const newDataFeeds = dataFeeds.filter((dataFeed) => !(dataFeed.dataFeedId in getStorage().dataFeedIdToOevDataFeed));
+    const newOevDataFeeds = deriveOevDataFeeds(newDataFeeds);
+
+    if (newDataFeeds.length > 0) {
+      updateStorage((draft) => {
+        // eslint-disable-next-line unicorn/no-for-loop
+        for (let index = 0; index < newDataFeeds.length; index++) {
+          draft.dataFeedIdToOevDataFeed[newDataFeeds[index]!.dataFeedId as Hex] = newOevDataFeeds[index]!;
+        }
+      });
+    }
+
+    return dataFeeds.map(({ dataFeedId }) => getStorage().dataFeedIdToOevDataFeed[dataFeedId]!);
+  }
+
+  getDappOevUpdateDataFeedSignedData(
+    dataFeeds: DataFeed[], // NOTE: This expects the base data feeds to be passed (not the OEV derived ones).
+    oevDataFeedValues: DataFeedWithSignedData[]
+  ): string[][] {
+    return zip(dataFeeds, oevDataFeedValues).map(([dataFeed, oevDataFeedValue]) =>
+      encodeSignedDataForOevUpdate(dataFeed!, oevDataFeedValue!)
+    );
   }
 
   async getDappOevDataFeedSimulateCalls(signedDataArray: string[][]): Promise<string[]> {
@@ -278,11 +299,10 @@ export class Compound3Bot {
       return;
     }
 
-    const dataFeedBeacons = await this.getDataFeedsBeacons();
-    if (!dataFeedBeacons) return;
-
-    const realTimeFeedValues = await getRealTimeFeedValues(dataFeedBeacons, env.SIGNED_API_FETCH_DELAY_MS);
-    const signedDataArray = this.getDappOevUpdateDataFeedSignedData(realTimeFeedValues);
+    const dataFeeds = await this.refreshDataFeeds();
+    const oevDataFeeds = this.deriveOevDataFeeds(dataFeeds);
+    const oevFeedValues = await getOevFeedValues(oevDataFeeds, env.SIGNED_API_FETCH_DELAY_MS);
+    const signedDataArray = this.getDappOevUpdateDataFeedSignedData(dataFeeds, oevFeedValues);
     const dapiSimulateUpdateCalls = await this.getDappOevDataFeedSimulateCalls(signedDataArray);
     const liquidatablePositions = await findLiquidatablePositions(dapiSimulateUpdateCalls);
     const positionsToLiquidate = liquidatablePositions.slice(0, env.MAX_POSITIONS_TO_LIQUIDATE);

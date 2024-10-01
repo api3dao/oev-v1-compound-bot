@@ -3,7 +3,7 @@ import { ethers } from 'ethers';
 import { produce } from 'immer';
 
 import { allPositions, lastBlock } from '../all-positions.json';
-import { type Beacon, type Api3Feed } from '../beacons';
+import { type Beacon, type Api3Feed, type DataFeed } from '../beacons';
 import { createBaseConnectors, type BaseConnectors } from '../chain';
 import { env } from '../env';
 import { createOevNetworkConnectors, type OevNetworkConnectors } from '../oev-network';
@@ -20,6 +20,7 @@ export interface Compound3BotStorage {
   targetChainLastBlock: number;
   currentlyLiquidatedPositions: Compound3Position[];
   dataFeedIdToBeacons: Record<Hex, Beacon[]>;
+  dataFeedIdToOevDataFeed: Record<Hex, DataFeed>;
   dapiNameHashToDataFeedId: Record<Hex, Hex>;
   baseConnectors: BaseConnectors;
   oevNetworkConnectors: OevNetworkConnectors;
@@ -42,6 +43,7 @@ export const initializeStorage = (api3FeedsToWatch: Api3Feed[]) => {
     currentlyLiquidatedPositions: [],
     dapiNameHashToDataFeedId: {},
     dataFeedIdToBeacons: {},
+    dataFeedIdToOevDataFeed: {},
     interestingPositions: [],
     oevNetworkConnectors,
     targetChainLastBlock: lastBlock,

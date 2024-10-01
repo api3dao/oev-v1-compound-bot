@@ -1,4 +1,4 @@
-import { deriveBeaconId, executeRequest, sleep, type Address, type Hex } from '@api3/commons';
+import { deriveBeaconId, deriveBeaconSetId, executeRequest, sleep, type Address, type Hex } from '@api3/commons';
 import {
   DapiProxyWithOev__factory as DapiProxyWithOevFactory,
   type AirseekerRegistry,
@@ -6,16 +6,21 @@ import {
 } from '@api3/contracts';
 import { go } from '@api3/promise-utils';
 import { ethers } from 'ethers';
-import { groupBy } from 'lodash';
+import { type Dictionary, groupBy, keyBy, zip } from 'lodash';
 
 import { API3_SIGNED_API_BASE_URL, NODARY_SIGNED_API_BASE_URL } from './constants';
 import { logger } from './logger';
 
 export interface Beacon {
-  airnodeAddress: string;
-  templateId: string;
-  beaconId: string;
+  airnodeAddress: Hex;
+  templateId: Hex;
+  beaconId: Hex;
 }
+
+export type DataFeed = {
+  dataFeedId: Hex;
+  beacons: Beacon[];
+};
 
 export type Api3Feed = {
   proxyAddress: Address;
@@ -23,6 +28,10 @@ export type Api3Feed = {
   dapiNameHash: Hex; // The hash of the encoded dAPI name (packed keccak256).
   oevEnabled: boolean;
 };
+
+export interface DataFeedWithSignedData extends DataFeed {
+  signedData: (SignedData | null)[];
+}
 
 export const deriveDapiNameHash = (encodedDapiName: string) =>
   ethers.solidityPackedKeccak256(['bytes32'], [encodedDapiName]) as Hex;
@@ -41,10 +50,9 @@ const decodeDataFeedDetails = (dataFeed: string): Beacon[] | null => {
   if (dataFeed.length === 2 + 32 * 2 + 32 * 2) {
     const [airnodeAddress, templateId] = ethers.AbiCoder.defaultAbiCoder().decode(['address', 'bytes32'], dataFeed);
 
-    const oevTemplateId = ethers.solidityPackedKeccak256(['bytes32'], [templateId]) as Hex;
-    const dataFeedId = deriveBeaconId(airnodeAddress, oevTemplateId) as Address;
+    const dataFeedId = deriveBeaconId(airnodeAddress, templateId) as Address;
 
-    return [{ beaconId: dataFeedId, airnodeAddress, templateId: oevTemplateId }];
+    return [{ beaconId: dataFeedId, airnodeAddress, templateId }];
   }
 
   const [airnodeAddresses, templateIds] = ethers.AbiCoder.defaultAbiCoder().decode(
@@ -54,10 +62,9 @@ const decodeDataFeedDetails = (dataFeed: string): Beacon[] | null => {
 
   const beacons = (airnodeAddresses as Address[]).map((airnodeAddress, idx) => {
     const templateId = templateIds[idx] as Hex;
-    const oevTemplateId = ethers.solidityPackedKeccak256(['bytes32'], [templateId]) as Hex;
-    const beaconId = deriveBeaconId(airnodeAddress, oevTemplateId) as Address;
+    const beaconId = deriveBeaconId(airnodeAddress, templateId) as Address;
 
-    return { beaconId, airnodeAddress, templateId: oevTemplateId };
+    return { beaconId, airnodeAddress, templateId };
   });
 
   return beacons;
@@ -105,7 +112,7 @@ export const fetchDataFeedsDetails = async (airseekerRegistry: AirseekerRegistry
     return null;
   }
 
-  return goFetchDataFeedsDetails.data;
+  return Object.fromEntries(dataFeedIds.map((id, index) => [id, goFetchDataFeedsDetails.data[index]!]));
 };
 
 export type SignedData = SignedDataSingleObject & {
@@ -140,17 +147,18 @@ const fetchSignedData = async (url: string) => {
 // Fetches the signed data for multiple beacons across multiple feeds in parallel in an optimal way. If any of the
 // Signed API call fails or there is no value for the required beacon, the API will simply omit the values for those
 // beacons (this should happen very rarely).
-export const getRealTimeFeedValues = async (
-  beacons: Beacon[],
+export const getOevFeedValues = async (
+  dataFeeds: DataFeed[],
   signedApiFetchDelayMs: number
-): Promise<SignedData[]> => {
+): Promise<DataFeedWithSignedData[]> => {
   // Group the beacons by Airnode address to determine how many off-chain calls to make.
+  const beacons = dataFeeds.flatMap((beaconSet) => beaconSet.beacons);
   const groupedBeacons = groupBy(beacons, (beacon) => beacon.airnodeAddress);
   const airnodes = Object.keys(groupedBeacons);
 
   logger.info('Fetching signed data from Signed APIs', { count: airnodes.length });
   const signedApiBeaconsDataPerAirnode = await Promise.all(
-    airnodes.map(async (airnodeAddress, index): Promise<SignedData[]> => {
+    airnodes.map(async (airnodeAddress, index): Promise<Dictionary<SignedData>> => {
       await sleep(index * signedApiFetchDelayMs);
 
       const goResponse = await go(async () =>
@@ -160,7 +168,7 @@ export const getRealTimeFeedValues = async (
         ])
       );
 
-      if (!goResponse.success) return [];
+      if (!goResponse.success) return {};
 
       const response = goResponse.data;
       const beaconIds = groupedBeacons[airnodeAddress]!.map((beacon) => beacon.beaconId);
@@ -179,11 +187,20 @@ export const getRealTimeFeedValues = async (
         })
         .filter(Boolean);
 
-      return beaconValues;
+      return keyBy(beaconValues, ({ beaconId }) => beaconId);
     })
   );
 
-  return signedApiBeaconsDataPerAirnode.flat();
+  const airnodeToSignedData = Object.fromEntries(
+    airnodes.map((airnode, index) => [airnode, signedApiBeaconsDataPerAirnode[index]!])
+  );
+
+  return dataFeeds.map((dataFeed) => ({
+    ...dataFeed,
+    signedData: dataFeed.beacons.map(
+      ({ airnodeAddress, beaconId }) => airnodeToSignedData[airnodeAddress]![beaconId] ?? null
+    ),
+  }));
 };
 
 export const getUpdateDataFeedSignedData = (realTimeFeedValues: SignedData[], beaconSets: Beacon[][]): string[][] =>
@@ -199,3 +216,53 @@ export const getUpdateDataFeedSignedData = (realTimeFeedValues: SignedData[], be
       );
     return signedData;
   });
+
+export const encodeSignedDataForOevUpdate = (dataFeed: DataFeed, oevDataFeedValue: DataFeedWithSignedData) => {
+  return zip(dataFeed.beacons, oevDataFeedValue.beacons, oevDataFeedValue.signedData).map(
+    ([beacon, oevBeacon, oevSignedData]) => {
+      const { templateId } = beacon!;
+      const { airnodeAddress } = oevBeacon!;
+
+      if (oevSignedData === null) {
+        return ethers.AbiCoder.defaultAbiCoder().encode(
+          ['address', 'bytes32', 'uint256', 'bytes', 'bytes'],
+          [airnodeAddress, templateId, 0, '0x', '0x']
+        );
+      }
+
+      const { signature, timestamp, encodedValue } = oevSignedData!;
+      return ethers.AbiCoder.defaultAbiCoder().encode(
+        ['address', 'bytes32', 'uint256', 'bytes', 'bytes'],
+        [airnodeAddress, templateId, timestamp, encodedValue, signature]
+      );
+    }
+  );
+};
+
+const deriveOevTemplateId = (templateId: Hex) => {
+  return ethers.solidityPackedKeccak256(['bytes32'], [templateId]) as Hex;
+};
+
+export const deriveOevDataFeeds = (dataFeeds: DataFeed[]) => {
+  return dataFeeds.map((dataFeed): DataFeed => {
+    // Map all of the data feed beacons
+    const oevBeacons = dataFeed.beacons.map(({ airnodeAddress, templateId }) => {
+      const oevTemplateId = deriveOevTemplateId(templateId);
+      return {
+        airnodeAddress,
+        templateId: oevTemplateId,
+        beaconId: deriveBeaconId(airnodeAddress as Hex, oevTemplateId as Hex) as Hex,
+      };
+    });
+
+    const oevDataFeedId =
+      oevBeacons.length === 1
+        ? oevBeacons[0]!.beaconId
+        : (deriveBeaconSetId(oevBeacons.map(({ beaconId }) => beaconId as Hex)) as Hex);
+
+    return {
+      dataFeedId: oevDataFeedId,
+      beacons: oevBeacons,
+    };
+  });
+};
