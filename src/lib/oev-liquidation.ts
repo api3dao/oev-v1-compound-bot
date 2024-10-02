@@ -9,6 +9,7 @@ import {
   DAPP_ID,
   OEV_AUCTION_LENGTH_SECONDS,
   OEV_AUCTIONEER_MAJOR_VERSION,
+  OEV_BIDDING_PHASE_BUFFER_SECONDS,
   OEV_BIDDING_PHASE_LENGTH_SECONDS,
   POSITIONS_CLOSE_TO_LIQUIDATION_LOG_SIZE,
 } from '../constants';
@@ -184,6 +185,28 @@ export const calculateExpectedProfit = async (
   return totalProfit;
 };
 
+const determineSignedDataTimestampCutoff = () => {
+  const auctionOffset = Number(
+    BigInt(ethers.solidityPackedKeccak256(['uint256'], [DAPP_ID])) % BigInt(OEV_AUCTION_LENGTH_SECONDS)
+  );
+  const currentTimestamp = Math.floor(Date.now() / 1000);
+  const timeInCurrentAuction = (currentTimestamp - auctionOffset) % OEV_AUCTION_LENGTH_SECONDS;
+  const auctionStartTimestamp = currentTimestamp - timeInCurrentAuction;
+  const biddingPhaseEndTimestamp = auctionStartTimestamp + OEV_BIDDING_PHASE_LENGTH_SECONDS;
+  let signedDataTimestampCutoff = auctionStartTimestamp + OEV_BIDDING_PHASE_LENGTH_SECONDS;
+
+  if (biddingPhaseEndTimestamp - currentTimestamp < OEV_BIDDING_PHASE_BUFFER_SECONDS) {
+    logger.info('Not enough time to place bid in current auction, bidding for the next one', {
+      currentTimestamp,
+      biddingPhaseEndTimestamp,
+      auctionOffset,
+    });
+    signedDataTimestampCutoff += OEV_AUCTION_LENGTH_SECONDS;
+  }
+
+  return signedDataTimestampCutoff;
+};
+
 export const placeBid = async (bidAmount: bigint) => {
   const { oevNetworkConnectors, compound3Connectors, baseConnectors } = getStorage();
   const { chainId } = await baseConnectors.provider.getNetwork();
@@ -192,13 +215,8 @@ export const placeBid = async (bidAmount: bigint) => {
   const nonce = ethers.hexlify(ethers.randomBytes(32));
   const bidDetails = ethers.AbiCoder.defaultAbiCoder().encode(['address', 'bytes32'], [liquidatorAddress, nonce]);
 
-  const auctionOffset = Number(
-    BigInt(ethers.solidityPackedKeccak256(['uint256'], [DAPP_ID])) % BigInt(OEV_AUCTION_LENGTH_SECONDS)
-  );
-  const currentTimestamp = Math.floor(Date.now() / 1000);
-  const timeInCurrentAuction = (currentTimestamp - auctionOffset) % OEV_AUCTION_LENGTH_SECONDS;
-  const auctionStartTimestamp = currentTimestamp - timeInCurrentAuction;
-  const signedDataTimestampCutoff = auctionStartTimestamp + OEV_BIDDING_PHASE_LENGTH_SECONDS;
+  const signedDataTimestampCutoff = determineSignedDataTimestampCutoff();
+  const nextBiddingPhaseEndTimestamp = signedDataTimestampCutoff + OEV_AUCTION_LENGTH_SECONDS;
 
   const sender = oevNetworkConnectors.wallet.address;
   const bidDetailsHash = ethers.keccak256(bidDetails);
@@ -208,10 +226,18 @@ export const placeBid = async (bidAmount: bigint) => {
   );
   const bidId = ethers.solidityPackedKeccak256(['address', 'bytes32', 'bytes32'], [sender, bidTopic, bidDetailsHash]);
 
-  logger.info('Placing bid', { bidId, bidTopic, bidAmount, bidDetails });
+  logger.info('Placing bid', { bidId, bidTopic, bidAmount, bidDetails, nextBiddingPhaseEndTimestamp });
   const txResponse = await oevNetworkConnectors.oevAuctionHouse
     .connect(oevNetworkConnectors.wallet)
-    .placeBid(bidTopic, chainId, bidAmount, bidDetails, bidAmount, bidAmount);
+    .placeBidWithExpiration(
+      bidTopic,
+      chainId,
+      bidAmount,
+      bidDetails,
+      bidAmount,
+      bidAmount,
+      nextBiddingPhaseEndTimestamp
+    );
 
   const txReceipt = await txResponse.wait(1, env.OEV_PLACE_BID_TRANSACTION_TIMEOUT_MS);
 
