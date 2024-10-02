@@ -20,6 +20,12 @@ import { type Compound3PositionDetails, type GetAccountsDetails } from './compou
 import { computeLoanToValueFactor } from './positions';
 import { getStorage } from './storage';
 
+export interface ReportFulfillmentParams {
+  bidTopic: string;
+  bidDetailsHash: string;
+  fulfillmentDetails: string;
+}
+
 export const findLiquidatablePositions = async (dapiUpdateCalls: string[]) => {
   const {
     interestingPositions,
@@ -211,7 +217,7 @@ export const placeBid = async (bidAmount: bigint) => {
 
   if (txReceipt === null) {
     logger.error('Waiting for transaction receipt timed out');
-    return { bidId, bidTopic, signedDataTimestampCutoff };
+    return { bidId, bidTopic, bidDetailsHash, signedDataTimestampCutoff };
   }
   const { hash: txHash } = txReceipt;
 
@@ -221,7 +227,7 @@ export const placeBid = async (bidAmount: bigint) => {
   }
   logger.info('Bid placed successfully', { txHash });
 
-  return { bidId, bidTopic, signedDataTimestampCutoff };
+  return { bidId, bidTopic, bidDetailsHash, signedDataTimestampCutoff };
 };
 
 export const liquidatePositions = async (
@@ -320,4 +326,14 @@ export const liquidatePositions = async (
 
     logger.info('Liquidation successful');
   });
+
+  return txReceipt;
+};
+
+export const reportFulfillment = async (params: ReportFulfillmentParams) => {
+  logger.info('Reporting fulfillment', params);
+  const { oevAuctionHouse, wallet } = getStorage().oevNetworkConnectors;
+  const { bidTopic, bidDetailsHash, fulfillmentDetails } = params;
+
+  return oevAuctionHouse.connect(wallet).reportFulfillment(bidTopic, bidDetailsHash, fulfillmentDetails);
 };

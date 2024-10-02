@@ -21,6 +21,7 @@ import {
   findLiquidatablePositions,
   liquidatePositions,
   placeBid,
+  reportFulfillment,
 } from './lib/oev-liquidation';
 import { fetchPositionsChunk, filterPositions, POSITIONS_TO_WATCH_FILE_PATH } from './lib/positions';
 import { type Compound3Position, getStorage, initializeStorage, updateStorage } from './lib/storage';
@@ -318,7 +319,7 @@ export class Compound3Bot {
     if (!placedBid) {
       return; // Failure already logged
     }
-    const { bidId, bidTopic, signedDataTimestampCutoff } = placedBid;
+    const { bidId, bidTopic, bidDetailsHash, signedDataTimestampCutoff } = placedBid;
     const positions = positionsToLiquidate.map(({ position }) => position);
 
     updateStorage((draft) => {
@@ -381,6 +382,30 @@ export class Compound3Bot {
       if (goLiquidate.error) {
         logger.error('Unexpected liquidation error', goLiquidate.error);
       }
+
+      const txReceipt = goLiquidate.data;
+      if (!txReceipt || txReceipt.status === 0) {
+        // The error has been already handled, so this is an expected case.
+        logger.info('Not reporting fulfillment because the transaction was aborted or failed');
+        return;
+      }
+
+      const goReportFulfillment = await go(
+        () =>
+          reportFulfillment({
+            bidTopic,
+            bidDetailsHash,
+            fulfillmentDetails: txReceipt.hash,
+          }),
+        {
+          totalTimeoutMs: env.OEV_REPORT_FULFILLMENT_TIMEOUT_MS,
+        }
+      );
+      if (!goReportFulfillment.success) {
+        logger.error(`Failed to report fulfillment: ${goReportFulfillment.error.message}`);
+        return;
+      }
+      logger.info('Reported fulfillment', { txHash: goReportFulfillment.data.hash });
     }, 0);
   }
 
