@@ -278,9 +278,9 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
   }
 
   function _withdrawWethAndReturnProfit(uint256 wethBalanceBefore) internal returns (uint256, uint256) {
-    uint256 wethBalance = weth.balanceOf(address(this));
-    if (wethBalance > 0) {
-      weth.withdraw(wethBalance);
+    uint256 wethBalanceAfter = weth.balanceOf(address(this));
+    if (wethBalanceAfter > 0) {
+      weth.withdraw(wethBalanceAfter);
     }
 
     uint8 numberOfAssets = comet.numAssets();
@@ -292,7 +292,6 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IUniswapV3Flash
       }
     }
 
-    uint256 wethBalanceAfter = address(this).balance;
     uint256 profit = wethBalanceAfter - wethBalanceBefore;
     uint256 profitUsd = (profit * comet.getPrice(wethAsset.priceFeed)) / wethAsset.scale;
     profitReceiver.call{ value: profit }('');
