@@ -203,6 +203,12 @@ export class Compound3Bot {
     );
   }
 
+  cleanupLiquidationAttempt() {
+    updateStorage((draft) => {
+      draft.currentlyLiquidatedPositions = [];
+    });
+  }
+
   async onFetchAndFilterNewPositions() {
     const { allPositions, currentPositions, interestingPositions } = getStorage();
 
@@ -350,10 +356,12 @@ export class Compound3Bot {
 
       if (goAwardedBid.error) {
         logger.error('Failed to poll awarded bid', goAwardedBid.error);
+        this.cleanupLiquidationAttempt();
         return;
       }
       if (goAwardedBid.data.args.bidId !== bidId) {
         logger.error('Unexpected bid won the auction', { winningBidId: goAwardedBid.data.args.bidId, bidId });
+        this.cleanupLiquidationAttempt();
         return;
       }
 
@@ -375,9 +383,7 @@ export class Compound3Bot {
         }
       );
 
-      updateStorage((draft) => {
-        draft.currentlyLiquidatedPositions = [];
-      });
+      this.cleanupLiquidationAttempt();
 
       if (goLiquidate.error) {
         logger.error('Unexpected liquidation error', goLiquidate.error);
