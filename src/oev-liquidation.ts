@@ -64,7 +64,6 @@ export class Compound3Bot {
       createRunInLoopOptions(
         'initialize-target-chain',
         env.INITIALIZE_TARGET_CHAIN_TIMEOUT_MS,
-        env.BOT_ENABLED,
         env.RUN_IN_LOOP_MAX_WAIT_TIME_PERCENTAGE,
         0
       )
@@ -237,7 +236,6 @@ export class Compound3Bot {
       createRunInLoopOptions(
         'fetch-and-filter-new-positions',
         env.FETCH_AND_FILTER_NEW_POSITIONS_FREQUENCY_MS,
-        env.BOT_ENABLED,
         env.RUN_IN_LOOP_MAX_WAIT_TIME_PERCENTAGE
       )
     );
@@ -246,7 +244,6 @@ export class Compound3Bot {
       createRunInLoopOptions(
         'reset-interesting-positions',
         env.RESET_INTERESTING_POSITIONS_FREQUENCY_MS,
-        env.BOT_ENABLED,
         env.RUN_IN_LOOP_MAX_WAIT_TIME_PERCENTAGE
       )
     );
@@ -255,7 +252,6 @@ export class Compound3Bot {
       createRunInLoopOptions(
         'reset-current-positions',
         env.RESET_CURRENT_POSITIONS_FREQUENCY_MS,
-        env.BOT_ENABLED,
         env.RUN_IN_LOOP_MAX_WAIT_TIME_PERCENTAGE
       )
     );
@@ -264,7 +260,6 @@ export class Compound3Bot {
       createRunInLoopOptions(
         'initiate-oev-liquidations',
         env.INITIATE_OEV_LIQUIDATIONS_FREQUENCY_MS,
-        env.BOT_ENABLED,
         env.RUN_IN_LOOP_MAX_WAIT_TIME_PERCENTAGE
       )
     );

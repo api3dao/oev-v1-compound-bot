@@ -20,7 +20,6 @@ export const mergePositions = (
 export const createRunInLoopOptions = (
   logLabel: Lowercase<string>,
   frequencyMs: number,
-  enabled: boolean,
   maxWaitTimePercentage: number,
   initialDelayMs = frequencyMs
 ): RunInLoopOptions => {
@@ -29,7 +28,7 @@ export const createRunInLoopOptions = (
     logLabel,
     frequencyMs,
     hardTimeoutMs: frequencyMs * RUN_IN_LOOP_HARD_TIMEOUT_MULTIPLIER,
-    enabled,
+    enabled: true,
     maxWaitTimeMs: getPercentageValue(frequencyMs, maxWaitTimePercentage),
     initialDelayMs,
   };
