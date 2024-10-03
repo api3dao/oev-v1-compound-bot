@@ -267,14 +267,17 @@ export const liquidatePositions = async (
 
   // Prepare liquidation calldata.
   const liquidationParams: Compound3Liquidator.PayBidAndUpdateFeedsAndLiquidateParamsStruct = {
-    liquidateParams: {
-      liquidatableAccounts: liquidatablePositions.map(({ position }) => position),
-      maxAmountsToPurchase: [MaxUint256, MaxUint256, MaxUint256],
-      liquidationThreshold: 0n,
+    payOevBidCallbackData: {
+      signedDataArray,
+      liquidateParams: {
+        liquidatableAccounts: liquidatablePositions.map(({ position }) => position),
+        maxAmountsToPurchase: [MaxUint256, MaxUint256, MaxUint256],
+        liquidationThreshold: 0n,
+      },
     },
     bidAmount,
     signature,
-    signedDataArray,
+
     signedDataTimestampCutoff,
   };
 
