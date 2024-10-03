@@ -15,7 +15,6 @@ export const env = cleanEnv(process.env, {
   LOGGER_ENABLED: bool({ default: true }),
 
   BORROWER_LOGS_LOOKBACK_BLOCKS: num(),
-  COMET_ADDRESS: str(),
   FETCH_AND_FILTER_NEW_POSITIONS_FREQUENCY_MS: num(),
   HOT_WALLET_PRIVATE_KEY: str(),
   INITIALIZE_TARGET_CHAIN_TIMEOUT_MS: num(),

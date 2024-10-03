@@ -5,7 +5,7 @@ import { chunk } from 'lodash';
 
 import allPositionsJsonFile from '../all-positions.json';
 import { defaultAllPositions } from '../cli-utils';
-import { PERCENTAGE_VALUE_MANTISSA } from '../constants';
+import { COMET_ADDRESS, PERCENTAGE_VALUE_MANTISSA } from '../constants';
 import { env } from '../env';
 import { logger } from '../logger';
 import { fetchPositions, mergePositions } from '../utils';
@@ -89,7 +89,7 @@ export const fetchPositionsChunk = async (startBlockNumber: number, endBlockNumb
   const events = await (async (fromBlock: number, toBlock: number) => {
     const { baseConnectors, compound3Connectors } = getStorage();
     const logs = await baseConnectors.provider.getLogs({
-      address: env.COMET_ADDRESS,
+      address: COMET_ADDRESS,
       fromBlock,
       toBlock,
       // When an user borrows an asset, it's withdrawn from the Comet and a Withdraw event is emitted. See:

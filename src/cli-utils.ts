@@ -6,7 +6,7 @@ import { format } from 'prettier';
 
 import { Compound3Liquidator__factory as Compound3LiquidatorFactory } from '../typechain-types';
 
-import { env } from './env';
+import { COMET_ADDRESS } from './constants';
 import {
   ALL_POSITIONS_FILE_PATH,
   POSITIONS_TO_WATCH_FILE_PATH,
@@ -49,7 +49,7 @@ export const runCliUtils = async () => {
 
       const deployTx = await new Compound3LiquidatorFactory(baseConnectors.wallet).deploy(
         ethers.ZeroAddress,
-        env.COMET_ADDRESS
+        COMET_ADDRESS
       );
       await deployTx.deploymentTransaction()?.wait(1);
       logger.info('Deployed Compound3Liquidator', {
