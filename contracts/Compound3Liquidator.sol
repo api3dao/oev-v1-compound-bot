@@ -175,7 +175,7 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IApi3ServerV1Oe
     _liquidate(data.liquidateParams);
 
     _withdrawWeth();
-    msg.sender.call{ value: amountOwed }('');
+    API3_SERVER_V1_OEV_EXTENSION.call{ value: amountOwed }('');
   }
 
   /// @notice Callback for flash swaps through Uniswap V3
