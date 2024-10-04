@@ -12,9 +12,9 @@ import { API3_SIGNED_API_BASE_URL, NODARY_SIGNED_API_BASE_URL } from './constant
 import { logger } from './logger';
 
 export interface Beacon {
-  airnodeAddress: Hex;
-  templateId: Hex;
-  beaconId: Hex;
+  airnodeAddress: string;
+  templateId: string;
+  beaconId: string;
 }
 
 export type DataFeed = {
@@ -239,8 +239,8 @@ export const encodeSignedDataForOevUpdate = (dataFeed: DataFeed, oevDataFeedValu
   );
 };
 
-const deriveOevTemplateId = (templateId: Hex) => {
-  return ethers.solidityPackedKeccak256(['bytes32'], [templateId]) as Hex;
+const deriveOevTemplateId = (templateId: string) => {
+  return ethers.solidityPackedKeccak256(['bytes32'], [templateId]);
 };
 
 export const deriveOevDataFeeds = (dataFeeds: DataFeed[]) => {
