@@ -29,7 +29,7 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback, IApi3ServerV1Oe
   address public constant WSTETH = 0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452;
   address public constant SWAP_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
   address public constant UNISWAP_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
-  address public constant API3_SERVER_V1_OEV_EXTENSION = 0xF930D1E37098128326F8731a476347f0840337cA;
+  address public constant API3_SERVER_V1_OEV_EXTENSION = 0x6a6F4b90ac94Df292fAe521b24b94cE8E58EB91e;
 
   mapping(address => mapping(address => uint24)) public uniswapPoolFees;
 
