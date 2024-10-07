@@ -61,7 +61,7 @@ contract Compound3Liquidator is Ownable, IUniswapV3SwapCallback {
   /// mirrors the logic of
   /// https://github.com/compound-finance/comet/blob/f41fec9858ae7e53be6cde96c74c3fa16782fa2a/contracts/Comet.sol#L524
   ///
-  /// NOTE: The returns returned numbers are scaled by 10^8.
+  /// NOTE: The returned numbers are scaled by 10^8.
   /// @param accounts The accounts to get the details for.
   /// @return borrowsUsd The borrows in USD for each account.
   /// @return maxBorrowsUsd The maximum borrows in USD for each account.
