@@ -16,13 +16,13 @@ import {
 } from '../typechain-types';
 
 export const baseContractAddresses = {
-  api3OevCbethEthProxy: '0x7583f6435cAD95bcF30C2dD7fDbfD3c5Ab58Ce4C',
-  api3OevEthUsdProxy: '0x86313242dBfedD9C52733a0Ed384E917424A7436',
-  api3OevWstethStethProxy: '0x3739c04CfE9d4750Bb40fc46904d592f3ed8EdEf',
-  api3OevStethUsdProxy: '0x93d2D4Aae8143E2a067a54C8138Dc8054Ad79910',
-  api3OevUsdcUsdProxy: '0x773f1a8E77Bd9e91a84bD80Bf35e67e4989D5C4C',
+  api3OevCbethEthProxy: '0x5bbeEE12b8779E1809f52441a9c2de6a3eD3dEA5',
+  api3OevEthUsdProxy: '0x06314AbEEA3f6A308741b1Df209f55edB58354AB',
+  api3OevWstethStethProxy: '0x63e3509F3Dc9f055441369A9d54B04D6FeE4adaf',
+  api3OevStethUsdProxy: '0x75e5A34dad31D1DB19dBeC6fFB82EbBee5e0b9ab',
+  api3OevUsdcUsdProxy: '0x6FBea86770975081D935456FAFfAB88524a0d1EF',
   api3ServerV1: '0x709944a48cAf83535e43471680fDA4905FB3920a',
-  api3ServerV1OevExtension: '0xF930D1E37098128326F8731a476347f0840337cA',
+  api3ServerV1OevExtension: '0x6a6F4b90ac94Df292fAe521b24b94cE8E58EB91e',
   multicall3: '0xcA11bde05977b3631167028862bE2a173976CA11',
 } as const;
 
