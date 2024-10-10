@@ -120,9 +120,9 @@ variables) which perform certain tasks. These are:
 - `fetch-and-filter-new-positions` - Fetches logs from the last processed block til the current block of the network in
   use. Filters the logs for the `borrow` action and updates `allPositions`. Filters that result based on active borrow
   position and updates `currentPositions`. Filters that result based on LTV values and updates `interestingPositions`.
-- `reset-current-positions` - Reevaluates the `currentPositions` from `allPositions` and updates it. Also reevaluates
-  the `interestingPositions` from the updated `currentPositions` and updates it.
+- `reset-current-positions` - Reevaluates the `currentPositions` from `allPositions` and updates them. Also reevaluates
+  the `interestingPositions` from the updated `currentPositions` and updates them.
 - `reset-interesting-positions` - Reevaluates the `interestingPositions` from the updated `currentPositions` and updates
-  it.
+ them.
 - `initiate-oev-liquidations` - Uses `interestingPositions` to find out any positions that might be able to be
   liquidated. If there are any, it executes the liquidation.
