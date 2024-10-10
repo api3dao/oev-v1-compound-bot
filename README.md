@@ -101,7 +101,8 @@ abovementioned CLI command `prepare-positions-to-watch`.
 ### Liquidation
 
 Liquidations are made by interacting with our Compound3Liquidator contract. The details depend on the stage of the bot.
-The liquidation functions are located in `src/lib/oev-liquidation.ts`.
+The liquidation logic is slightly different for the OEV bot because the searcher needs to pay for the awarded bid on the
+OEV Network. The liquidation functions are located in `src/lib/oev-liquidation.ts`.
 
 The process in general is as follows:
 
@@ -123,6 +124,6 @@ variables) which perform certain tasks. These are:
 - `reset-current-positions` - Reevaluates the `currentPositions` from `allPositions` and updates them. Also reevaluates
   the `interestingPositions` from the updated `currentPositions` and updates them.
 - `reset-interesting-positions` - Reevaluates the `interestingPositions` from the updated `currentPositions` and updates
- them.
+  them.
 - `initiate-oev-liquidations` - Uses `interestingPositions` to find out any positions that might be able to be
   liquidated. If there are any, it executes the liquidation.
