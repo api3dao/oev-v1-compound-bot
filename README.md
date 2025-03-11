@@ -1,7 +1,8 @@
 # OEV v1 Compound Example Bot
 
-A searching bot for a [fork of Compound protocol](https://github.com/api3dao/oev-v1-compound/blob/main/README.md) using
-OEV v1 proxies.
+> An example Compound3 bot showcasing Api3 OEV solution
+
+⚠️ This bot was designed for a specific Compound3 deployment that we maintained with a dedicated market and UI at https://github.com/api3dao/oev-v1-compound. That repository has since been archived and testing infrastructure is no longer available. While the bot cannot be directly tested anymore, the codebase serves as a valuable reference for searchers implementing similar functionality. ⚠️
 
 This repository documents the necessary steps to update an MEV bot to an OEV bot. While the main branch is the final
 result of the OEV bot, there are branches for the previous steps, so one can easily compare the changes.
