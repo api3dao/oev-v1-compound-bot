@@ -1,6 +1,6 @@
 # OEV v1 Compound Example Bot
 
-> An example Compound3 bot showcasing Api3 OEV solution
+> An example Compound3 bot showcasing API3 OEV solution
 
 ⚠️ This bot was designed for a specific Compound3 deployment that we maintained with a dedicated market and UI at https://github.com/api3dao/oev-v1-compound. That repository has since been archived and testing infrastructure is no longer available. While the bot cannot be directly tested anymore, the codebase serves as a valuable reference for searchers implementing similar functionality. ⚠️
 
